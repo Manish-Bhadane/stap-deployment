@@ -1,0 +1,94 @@
+---
+- name: Setup Dynamic Target Host
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add target server dynamically
+      add_host:
+        name: "{{ server_ip }}"
+        groups: dynamic_targets
+        ansible_host: "{{ server_ip }}"
+        ansible_user: "{{ server_user }}"
+
+- name: Install S-TAP with Auto OS Detection
+  hosts: dynamic_targets
+  gather_facts: yes
+  vars:
+    stap_version: "{{ stap_version }}"
+    collector_ip: "{{ collector_ip }}"
+    db_type: "{{ db_type }}"
+    stap_repository: "/var/stap-repository/installers"
+  
+  tasks:
+    - name: Display selected S-TAP version
+      debug:
+        msg: "Installing S-TAP version {{ stap_version }}"
+    
+    - name: Detect Operating System
+      set_fact:
+        os_detected: >-
+          {% if ansible_distribution == 'RedHat' or ansible_distribution == 'CentOS' %}
+          rhel-{{ ansible_distribution_major_version }}
+          {% elif ansible_distribution == 'Ubuntu' %}
+          ubuntu-{{ ansible_distribution_version }}
+          {% elif ansible_distribution == 'Debian' %}
+          debian-{{ ansible_distribution_major_version }}
+          {% else %}
+          unknown
+          {% endif %}
+    
+    - name: Display detected OS
+      debug:
+        msg: "Detected OS: {{ os_detected }} ({{ ansible_distribution }} {{ ansible_distribution_version }})"
+    
+    - name: Set S-TAP installer filename
+      set_fact:
+        stap_installer: "guard-stap-{{ stap_version }}_r123502_v12_1_1-{{ os_detected }}-linux-x86_64.sh"
+    
+    - name: Display installer selection
+      debug:
+        msg: "Selected installer: {{ stap_installer }}"
+    
+    - name: Check if installer exists locally
+      stat:
+        path: "{{ stap_repository }}/{{ stap_installer }}"
+      delegate_to: localhost
+      register: installer_check
+    
+    - name: Fail if installer not found
+      fail:
+        msg: "ERROR: Installer {{ stap_installer }} not found in {{ stap_repository }}"
+      when: not installer_check.stat.exists
+    
+    - name: Copy S-TAP installer to target
+      copy:
+        src: "{{ stap_repository }}/{{ stap_installer }}"
+        dest: "/tmp/{{ stap_installer }}"
+        mode: '0755'
+    
+    - name: Install S-TAP
+      shell: |
+        /tmp/{{ stap_installer }} \
+          --collector {{ collector_ip }} \
+          --database {{ db_type }} \
+          --accept-license \
+          --enable-service \
+          --start-service
+      args:
+        creates: /opt/guardium/guard_stap
+      register: install_result
+    
+    - name: Display installation result
+      debug:
+        var: install_result.stdout_lines
+    
+    - name: Verify S-TAP service
+      systemd:
+        name: guard_stap
+        state: started
+        enabled: yes
+      register: service_status
+    
+    - name: Display success message
+      debug:
+        msg: "✅ S-TAP {{ stap_version }} successfully installed on {{ os_detected }}!"
