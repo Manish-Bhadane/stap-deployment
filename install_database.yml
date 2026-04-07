@@ -1,0 +1,216 @@
+---
+- name: Setup Dynamic Target Host
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add target server dynamically
+      add_host:
+        name: "{{ server_ip }}"
+        groups: dynamic_targets
+        ansible_host: "{{ server_ip }}"
+        ansible_user: "{{ server_user }}"
+        ansible_password: "{{ server_password }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+- name: Install Database on Target Server
+  hosts: dynamic_targets
+  become: yes
+  gather_facts: yes
+  vars:
+    db_type: "{{ db_type }}"
+    db_version: "{{ db_version }}"
+    db_name: "{{ db_name }}"
+    db_admin_user: "{{ db_admin_user }}"
+    db_admin_password: "{{ db_admin_password }}"
+    db_port: "{{ db_port }}"
+    data_dir: "{{ data_dir }}"
+  
+  tasks:
+    - name: Display installation parameters
+      debug:
+        msg: |
+          Installing {{ db_type | upper }} Database:
+          - Version: {{ db_version }}
+          - Database Name: {{ db_name }}
+          - Admin User: {{ db_admin_user }}
+          - Port: {{ db_port }}
+          - Data Directory: {{ data_dir }}
+    
+    # PostgreSQL Installation
+    - name: Install PostgreSQL (RHEL/CentOS)
+      block:
+        - name: Install PostgreSQL repository
+          yum:
+            name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-{{ ansible_distribution_major_version }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+            state: present
+            disable_gpg_check: yes
+        
+        - name: Disable default PostgreSQL module (RHEL 8+)
+          shell: dnf -qy module disable postgresql
+          when: ansible_distribution_major_version|int >= 8
+          ignore_errors: yes
+        
+        - name: Install PostgreSQL packages
+          yum:
+            name:
+              - "postgresql{{ db_version }}-server"
+              - "postgresql{{ db_version }}"
+              - "postgresql{{ db_version }}-contrib"
+            state: present
+        
+        - name: Initialize PostgreSQL database
+          shell: "/usr/pgsql-{{ db_version }}/bin/postgresql-{{ db_version }}-setup initdb"
+          args:
+            creates: "{{ data_dir }}/PG_VERSION"
+        
+        - name: Configure PostgreSQL to listen on all interfaces
+          lineinfile:
+            path: "{{ data_dir }}/postgresql.conf"
+            regexp: "^#?listen_addresses"
+            line: "listen_addresses = '*'"
+        
+        - name: Configure PostgreSQL authentication
+          lineinfile:
+            path: "{{ data_dir }}/pg_hba.conf"
+            line: "host    all             all             0.0.0.0/0               md5"
+        
+        - name: Start and enable PostgreSQL service
+          systemd:
+            name: "postgresql-{{ db_version }}"
+            state: started
+            enabled: yes
+        
+        - name: Create database
+          shell: |
+            sudo -u postgres psql -c "CREATE DATABASE {{ db_name }};"
+          ignore_errors: yes
+        
+        - name: Create database user
+          shell: |
+            sudo -u postgres psql -c "CREATE USER {{ db_admin_user }} WITH PASSWORD '{{ db_admin_password }}';"
+            sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_admin_user }};"
+          ignore_errors: yes
+        
+        - name: Open firewall for PostgreSQL
+          firewalld:
+            port: "{{ db_port }}/tcp"
+            permanent: yes
+            state: enabled
+            immediate: yes
+          ignore_errors: yes
+      
+      when: 
+        - db_type == 'postgresql'
+        - ansible_os_family == 'RedHat'
+    
+    # MySQL/MariaDB Installation
+    - name: Install MySQL/MariaDB (RHEL/CentOS)
+      block:
+        - name: Install MySQL/MariaDB packages
+          yum:
+            name:
+              - mariadb-server
+              - mariadb
+              - python3-PyMySQL
+            state: present
+        
+        - name: Start and enable MariaDB service
+          systemd:
+            name: mariadb
+            state: started
+            enabled: yes
+        
+        - name: Set MySQL root password
+          shell: |
+            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';"
+          ignore_errors: yes
+        
+        - name: Create database
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE DATABASE IF NOT EXISTS {{ db_name }};"
+        
+        - name: Create database user
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ db_admin_user }}'@'%' IDENTIFIED BY '{{ db_admin_password }}';"
+            mysql -u root -p'{{ db_admin_password }}' -e "GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_admin_user }}'@'%';"
+            mysql -u root -p'{{ db_admin_password }}' -e "FLUSH PRIVILEGES;"
+        
+        - name: Open firewall for MySQL
+          firewalld:
+            port: "{{ db_port }}/tcp"
+            permanent: yes
+            state: enabled
+            immediate: yes
+          ignore_errors: yes
+      
+      when:
+        - db_type in ['mysql', 'mariadb']
+        - ansible_os_family == 'RedHat'
+    
+    # MongoDB Installation
+    - name: Install MongoDB (RHEL/CentOS)
+      block:
+        - name: Add MongoDB repository
+          yum_repository:
+            name: mongodb-org
+            description: MongoDB Repository
+            baseurl: "https://repo.mongodb.org/yum/redhat/$releasever/mongodb-org/{{ db_version }}/x86_64/"
+            gpgcheck: yes
+            enabled: yes
+            gpgkey: "https://www.mongodb.org/static/pgp/server-{{ db_version }}.asc"
+        
+        - name: Install MongoDB packages
+          yum:
+            name: mongodb-org
+            state: present
+        
+        - name: Configure MongoDB to listen on all interfaces
+          lineinfile:
+            path: /etc/mongod.conf
+            regexp: "^  bindIp:"
+            line: "  bindIp: 0.0.0.0"
+        
+        - name: Start and enable MongoDB service
+          systemd:
+            name: mongod
+            state: started
+            enabled: yes
+        
+        - name: Create MongoDB admin user
+          shell: |
+            mongosh admin --eval "db.createUser({user: '{{ db_admin_user }}', pwd: '{{ db_admin_password }}', roles: [{role: 'root', db: 'admin'}]})"
+          ignore_errors: yes
+        
+        - name: Open firewall for MongoDB
+          firewalld:
+            port: "{{ db_port }}/tcp"
+            permanent: yes
+            state: enabled
+            immediate: yes
+          ignore_errors: yes
+      
+      when:
+        - db_type == 'mongodb'
+        - ansible_os_family == 'RedHat'
+    
+    - name: Display success message
+      debug:
+        msg: |
+          ✅ {{ db_type | upper }} Installation Complete!
+          
+          Database Details:
+          - Type: {{ db_type }}
+          - Version: {{ db_version }}
+          - Database Name: {{ db_name }}
+          - Admin User: {{ db_admin_user }}
+          - Port: {{ db_port }}
+          - Data Directory: {{ data_dir }}
+          
+          Connection Examples:
+          {% if db_type == 'postgresql' %}
+          psql -h {{ server_ip }} -p {{ db_port }} -U {{ db_admin_user }} -d {{ db_name }}
+          {% elif db_type in ['mysql', 'mariadb'] %}
+          mysql -h {{ server_ip }} -P {{ db_port }} -u {{ db_admin_user }} -p{{ db_admin_password }} {{ db_name }}
+          {% elif db_type == 'mongodb' %}
+          mongosh "mongodb://{{ db_admin_user }}:{{ db_admin_password }}@{{ server_ip }}:{{ db_port }}/{{ db_name }}?authSource=admin"
+          {% endif %}
