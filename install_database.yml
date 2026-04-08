@@ -1,8 +1,9 @@
 ---
 - name: Setup Dynamic Target Host
   hosts: localhost
-  gather_facts: no
+  gather_facts: false
   vars:
+    target_platform: "{{ platform | lower }}"
     target_server_ip: "{{ server_ip }}"
     target_server_user: "{{ server_user }}"
     target_server_password: "{{ server_password }}"
@@ -10,49 +11,54 @@
     - name: Validate required connection inputs
       assert:
         that:
+          - target_platform is defined
+          - target_platform in ['linux', 'windows']
           - target_server_ip is defined
           - target_server_ip | length > 0
           - target_server_user is defined
           - target_server_user | length > 0
           - target_server_password is defined
-        fail_msg: "Required survey fields missing: server_ip, server_user, or server_password"
+          - target_server_password | length > 0
+        fail_msg: "Required survey fields missing: platform, server_ip, server_user, server_password"
 
-    - name: Add target server dynamically
+    - name: Add Linux target dynamically
       add_host:
         name: dynamic_db_target
         groups: dynamic_targets
         ansible_host: "{{ target_server_ip }}"
         ansible_user: "{{ target_server_user }}"
         ansible_password: "{{ target_server_password }}"
+        ansible_connection: ssh
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
         ansible_python_interpreter: /usr/bin/python3
+      when: target_platform == 'linux'
+      changed_when: false
+
+    - name: Add Windows target dynamically
+      add_host:
+        name: dynamic_db_target
+        groups: dynamic_targets
+        ansible_host: "{{ target_server_ip }}"
+        ansible_user: "{{ target_server_user }}"
+        ansible_password: "{{ target_server_password }}"
+        ansible_connection: winrm
+        ansible_port: 5986
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+        ansible_shell_type: powershell
+      when: target_platform == 'windows'
       changed_when: false
 
 - name: Install Database on Target Server
   hosts: dynamic_targets
-  become: yes
-  gather_facts: yes
+  gather_facts: true
+  become: "{{ platform | lower == 'linux' }}"
   vars:
-    db_type: "{{ db_type }}"
-    db_version: "{{ db_version }}"
+    platform: "{{ platform | lower }}"
+    db_type: "{{ db_type | lower }}"
     db_name: "{{ db_name }}"
     db_admin_user: "{{ db_admin_user }}"
     db_admin_password: "{{ db_admin_password }}"
-
-    db_port_map:
-      postgresql: 5432
-      mysql: 3306
-      mariadb: 3306
-      mongodb: 27017
-
-    data_dir_map:
-      postgresql: "/var/lib/pgsql/{{ db_version }}/data"
-      mysql: "/var/lib/mysql"
-      mariadb: "/var/lib/mysql"
-      mongodb: "/var/lib/mongo"
-
-    db_port: "{{ db_port_map[db_type] }}"
-    data_dir: "{{ data_dir_map[db_type] }}"
 
     supported_db_types:
       - postgresql
@@ -60,27 +66,46 @@
       - mariadb
       - mongodb
 
+    db_port_map:
+      postgresql: 5432
+      mysql: 3306
+      mariadb: 3306
+      mongodb: 27017
+
+    db_port: "{{ db_port_map[db_type] }}"
+
+    linux_data_dir_map:
+      postgresql: "/var/lib/pgsql/data"
+      mysql: "/var/lib/mysql"
+      mariadb: "/var/lib/mysql"
+      mongodb: "/var/lib/mongo"
+
+    windows_data_dir_map:
+      postgresql: "C:\\Program Files\\PostgreSQL\\data"
+      mysql: "C:\\ProgramData\\MySQL\\MySQL Server\\Data"
+      mariadb: "C:\\Program Files\\MariaDB\\data"
+      mongodb: "C:\\data\\db"
+
+    data_dir: >-
+      {{
+        linux_data_dir_map[db_type]
+        if platform == 'linux'
+        else windows_data_dir_map[db_type]
+      }}
+
   pre_tasks:
     - name: Validate required database inputs
       assert:
         that:
-          - db_type is defined
+          - platform in ['linux', 'windows']
           - db_type in supported_db_types
-          - db_version is defined
-          - db_version | length > 0
           - db_name is defined
           - db_name | length > 0
           - db_admin_user is defined
           - db_admin_user | length > 0
           - db_admin_password is defined
           - db_admin_password | length > 0
-        fail_msg: "Required survey fields missing or invalid. Required: db_type, db_version, db_name, db_admin_user, db_admin_password"
-
-    - name: Validate supported operating system
-      assert:
-        that:
-          - ansible_os_family == "RedHat"
-        fail_msg: "This playbook currently supports only RHEL/CentOS/Rocky/AlmaLinux style systems."
+        fail_msg: "Required survey fields missing or invalid. Required: platform, db_type, db_name, db_admin_user, db_admin_password"
 
     - name: Display installation parameters
       debug:
@@ -88,142 +113,221 @@
           Database Installation Parameters
           =================================
           Target Server: {{ ansible_host }}
-          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Platform: {{ platform }}
+          OS Family: {{ ansible_os_family | default('windows') }}
           Database Type: {{ db_type }}
-          Database Version: {{ db_version }}
           Database Name: {{ db_name }}
           Admin User: {{ db_admin_user }}
           Database Port: {{ db_port }}
           Data Directory: {{ data_dir }}
 
   tasks:
-    - name: Install PostgreSQL
+    - name: Linux | PostgreSQL on RedHat family
       block:
-        - name: Install PostgreSQL repository
-          yum:
-            name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-{{ ansible_distribution_major_version }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
-            state: present
-            disable_gpg_check: yes
-
-        - name: Disable default PostgreSQL module for RHEL 8+
-          shell: dnf -qy module disable postgresql
-          when: ansible_distribution_major_version | int >= 8
-          changed_when: false
-          failed_when: false
-
-        - name: Install PostgreSQL packages
-          yum:
+        - name: Install PostgreSQL packages on RedHat
+          dnf:
             name:
-              - "postgresql{{ db_version }}-server"
-              - "postgresql{{ db_version }}"
-              - "postgresql{{ db_version }}-contrib"
+              - postgresql-server
+              - postgresql
             state: present
 
-        - name: Ensure PostgreSQL data parent directory exists
-          file:
-            path: "{{ data_dir | dirname }}"
-            state: directory
-            mode: "0755"
-
-        - name: Initialize PostgreSQL database
-          shell: "/usr/pgsql-{{ db_version }}/bin/postgresql-{{ db_version }}-setup initdb"
+        - name: Initialize PostgreSQL database on RedHat
+          command: postgresql-setup --initdb
           args:
-            creates: "{{ data_dir }}/PG_VERSION"
+            creates: /var/lib/pgsql/data/PG_VERSION
 
         - name: Configure PostgreSQL listen_addresses
           lineinfile:
-            path: "{{ data_dir }}/postgresql.conf"
+            path: /var/lib/pgsql/data/postgresql.conf
             regexp: "^#?listen_addresses\\s*="
-            line: "listen_addresses = *"
+            line: "listen_addresses = '*'"
 
         - name: Configure PostgreSQL client authentication
           lineinfile:
-            path: "{{ data_dir }}/pg_hba.conf"
+            path: /var/lib/pgsql/data/pg_hba.conf
             line: "host    all             all             0.0.0.0/0               md5"
 
-        - name: Start and enable PostgreSQL service
+        - name: Start and enable PostgreSQL on RedHat
           systemd:
-            name: "postgresql-{{ db_version }}"
+            name: postgresql
             state: started
-            enabled: yes
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'postgresql'
+        - ansible_os_family == 'RedHat'
 
-        - name: Create PostgreSQL database
-          become_user: postgres
-          shell: psql -tc "SELECT 1 FROM pg_database WHERE datname='{{ db_name }}'" | grep -q 1 || psql -c "CREATE DATABASE {{ db_name }};"
-          changed_when: true
-
-        - name: Create PostgreSQL admin user and grant privileges
-          become_user: postgres
-          shell: |
-            psql -tc "SELECT 1 FROM pg_roles WHERE rolname='{{ db_admin_user }}'" | grep -q 1 || psql -c "CREATE USER {{ db_admin_user }} WITH PASSWORD '{{ db_admin_password }}';"
-            psql -c "ALTER USER {{ db_admin_user }} WITH PASSWORD '{{ db_admin_password }}';"
-            psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_admin_user }};"
-          changed_when: true
-
-        - name: Open firewall for PostgreSQL
-          firewalld:
-            port: "{{ db_port }}/tcp"
-            permanent: yes
-            state: enabled
-            immediate: yes
-          ignore_errors: yes
-      when: db_type == "postgresql"
-
-    - name: Install MySQL or MariaDB
+    - name: Linux | PostgreSQL on Debian family
       block:
-        - name: Install MySQL/MariaDB packages
-          yum:
+        - name: Install PostgreSQL packages on Debian
+          apt:
+            name:
+              - postgresql
+            state: present
+            update_cache: true
+
+        - name: Start and enable PostgreSQL on Debian
+          service:
+            name: postgresql
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'postgresql'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | PostgreSQL on SUSE family
+      block:
+        - name: Install PostgreSQL packages on SUSE
+          zypper:
+            name:
+              - postgresql-server
+              - postgresql
+            state: present
+
+        - name: Start and enable PostgreSQL on SUSE
+          service:
+            name: postgresql
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'postgresql'
+        - ansible_os_family == 'Suse'
+
+    - name: Linux | MySQL on RedHat family
+      block:
+        - name: Install MySQL community repo package for EL8
+          dnf:
+            name: https://repo.mysql.com/mysql80-community-release-el8-1.noarch.rpm
+            state: present
+            disable_gpg_check: true
+          when: ansible_distribution_major_version | int == 8
+
+        - name: Install MySQL community repo package for EL9
+          dnf:
+            name: https://repo.mysql.com/mysql80-community-release-el9-1.noarch.rpm
+            state: present
+            disable_gpg_check: true
+          when: ansible_distribution_major_version | int == 9
+
+        - name: Disable default MySQL module if present
+          command: dnf -qy module disable mysql
+          changed_when: false
+          failed_when: false
+
+        - name: Install MySQL Community Server on RedHat
+          dnf:
+            name: mysql-community-server
+            state: present
+
+        - name: Start and enable MySQL on RedHat
+          systemd:
+            name: mysqld
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mysql'
+        - ansible_os_family == 'RedHat'
+
+    - name: Linux | MySQL on Debian family
+      block:
+        - name: Install MySQL packages on Debian
+          apt:
+            name:
+              - mysql-server
+            state: present
+            update_cache: true
+
+        - name: Start and enable MySQL on Debian
+          service:
+            name: mysql
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mysql'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | MySQL on SUSE family not yet implemented
+      fail:
+        msg: "MySQL installation for SUSE is not yet implemented in this playbook."
+      when:
+        - platform == 'linux'
+        - db_type == 'mysql'
+        - ansible_os_family == 'Suse'
+
+    - name: Linux | MariaDB on RedHat family
+      block:
+        - name: Install MariaDB packages on RedHat
+          dnf:
             name:
               - mariadb-server
               - mariadb
-              - python3-PyMySQL
             state: present
 
-        - name: Start and enable MariaDB service
+        - name: Start and enable MariaDB on RedHat
           systemd:
             name: mariadb
             state: started
-            enabled: yes
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mariadb'
+        - ansible_os_family == 'RedHat'
 
-        - name: Set MariaDB root password if needed
-          shell: |
-            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';" || true
-          changed_when: false
-
-        - name: Create MySQL/MariaDB database
-          shell: |
-            mysql -u root -p'{{ db_admin_password }}' -e "CREATE DATABASE IF NOT EXISTS {{ db_name }};"
-          changed_when: true
-
-        - name: Create MySQL/MariaDB admin user
-          shell: |
-            mysql -u root -p'{{ db_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ db_admin_user }}'@'%' IDENTIFIED BY '{{ db_admin_password }}';"
-            mysql -u root -p'{{ db_admin_password }}' -e "GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_admin_user }}'@'%';"
-            mysql -u root -p'{{ db_admin_password }}' -e "FLUSH PRIVILEGES;"
-          changed_when: true
-
-        - name: Open firewall for MySQL/MariaDB
-          firewalld:
-            port: "{{ db_port }}/tcp"
-            permanent: yes
-            state: enabled
-            immediate: yes
-          ignore_errors: yes
-      when: db_type in ["mysql", "mariadb"]
-
-    - name: Install MongoDB
+    - name: Linux | MariaDB on Debian family
       block:
-        - name: Add MongoDB repository
-          yum_repository:
-            name: mongodb-org
-            description: MongoDB Repository
-            baseurl: "https://repo.mongodb.org/yum/redhat/\$releasever/mongodb-org/{{ db_version }}/x86_64/"
-            gpgcheck: yes
-            enabled: yes
-            gpgkey: "https://www.mongodb.org/static/pgp/server-{{ db_version }}.asc"
+        - name: Install MariaDB packages on Debian
+          apt:
+            name:
+              - mariadb-server
+            state: present
+            update_cache: true
 
-        - name: Install MongoDB packages
-          yum:
+        - name: Start and enable MariaDB on Debian
+          service:
+            name: mariadb
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mariadb'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | MariaDB on SUSE family
+      block:
+        - name: Install MariaDB packages on SUSE
+          zypper:
+            name:
+              - mariadb
+              - mariadb-tools
+            state: present
+
+        - name: Start and enable MariaDB on SUSE
+          service:
+            name: mariadb
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mariadb'
+        - ansible_os_family == 'Suse'
+
+    - name: Linux | MongoDB on RedHat family
+      block:
+        - name: Add MongoDB repository on RedHat
+          yum_repository:
+            name: mongodb-org-7.0
+            description: MongoDB Repository
+            baseurl: "https://repo.mongodb.org/yum/redhat/$releasever/mongodb-org/7.0/x86_64/"
+            gpgcheck: true
+            enabled: true
+            gpgkey: "https://pgp.mongodb.com/server-7.0.asc"
+
+        - name: Install MongoDB packages on RedHat
+          dnf:
             name: mongodb-org
             state: present
 
@@ -241,47 +345,188 @@
             regexp: "^  bindIp:"
             line: "  bindIp: 0.0.0.0"
 
-        - name: Start and enable MongoDB service
+        - name: Start and enable MongoDB on RedHat
           systemd:
             name: mongod
             state: started
-            enabled: yes
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mongodb'
+        - ansible_os_family == 'RedHat'
 
+    - name: Linux | MongoDB on Debian family
+      block:
+        - name: Install prerequisite packages on Debian
+          apt:
+            name:
+              - gnupg
+              - curl
+            state: present
+            update_cache: true
+
+        - name: Add MongoDB apt key on Debian
+          apt_key:
+            url: "https://pgp.mongodb.com/server-7.0.asc"
+            state: present
+
+        - name: Add MongoDB apt repository on Debian
+          apt_repository:
+            repo: "deb [ arch=amd64 ] https://repo.mongodb.org/apt/{{ ansible_distribution | lower }} {{ ansible_distribution_release }}/mongodb-org/7.0 multiverse"
+            state: present
+            filename: mongodb-org-7.0
+
+        - name: Install MongoDB packages on Debian
+          apt:
+            name: mongodb-org
+            state: present
+            update_cache: true
+
+        - name: Start and enable MongoDB on Debian
+          service:
+            name: mongod
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mongodb'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | MongoDB on SUSE not yet implemented
+      fail:
+        msg: "MongoDB installation for SUSE is not yet implemented in this playbook."
+      when:
+        - platform == 'linux'
+        - db_type == 'mongodb'
+        - ansible_os_family == 'Suse'
+
+    - name: Linux | Configure PostgreSQL database and user
+      block:
+        - name: Create PostgreSQL database
+          become_user: postgres
+          shell: psql -tc "SELECT 1 FROM pg_database WHERE datname='{{ db_name }}'" | grep -q 1 || psql -c "CREATE DATABASE {{ db_name }};"
+          changed_when: true
+
+        - name: Create PostgreSQL admin user
+          become_user: postgres
+          shell: |
+            psql -tc "SELECT 1 FROM pg_roles WHERE rolname='{{ db_admin_user }}'" | grep -q 1 || psql -c "CREATE USER {{ db_admin_user }} WITH PASSWORD '{{ db_admin_password }}';"
+            psql -c "ALTER USER {{ db_admin_user }} WITH PASSWORD '{{ db_admin_password }}';"
+            psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_admin_user }};"
+          changed_when: true
+      when:
+        - platform == 'linux'
+        - db_type == 'postgresql'
+
+    - name: Linux | Configure MySQL database and user
+      block:
+        - name: Read MySQL temporary root password if present
+          shell: grep 'temporary password' /var/log/mysqld.log | tail -1 | awk '{print $NF}'
+          register: mysql_temp_password
+          changed_when: false
+          failed_when: false
+
+        - name: Set MySQL root password using temporary password
+          shell: |
+            mysql --connect-expired-password -u root -p'{{ mysql_temp_password.stdout }}' -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';"
+          when: mysql_temp_password.stdout | length > 0
+          changed_when: true
+          failed_when: false
+
+        - name: Set MySQL root password if already initialized
+          shell: |
+            mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';" || true
+          when: mysql_temp_password.stdout | length == 0
+          changed_when: false
+
+        - name: Create MySQL database
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE DATABASE IF NOT EXISTS {{ db_name }};"
+          changed_when: true
+
+        - name: Create MySQL admin user
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ db_admin_user }}'@'%' IDENTIFIED BY '{{ db_admin_password }}';"
+            mysql -u root -p'{{ db_admin_password }}' -e "GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_admin_user }}'@'%';"
+            mysql -u root -p'{{ db_admin_password }}' -e "FLUSH PRIVILEGES;"
+          changed_when: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mysql'
+
+    - name: Linux | Configure MariaDB database and user
+      block:
+        - name: Set MariaDB root password if needed
+          shell: |
+            mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';" || true
+          changed_when: false
+
+        - name: Create MariaDB database
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE DATABASE IF NOT EXISTS {{ db_name }};"
+          changed_when: true
+
+        - name: Create MariaDB admin user
+          shell: |
+            mysql -u root -p'{{ db_admin_password }}' -e "CREATE USER IF NOT EXISTS '{{ db_admin_user }}'@'%' IDENTIFIED BY '{{ db_admin_password }}';"
+            mysql -u root -p'{{ db_admin_password }}' -e "GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_admin_user }}'@'%';"
+            mysql -u root -p'{{ db_admin_password }}' -e "FLUSH PRIVILEGES;"
+          changed_when: true
+      when:
+        - platform == 'linux'
+        - db_type == 'mariadb'
+
+    - name: Linux | Configure MongoDB admin user
+      block:
         - name: Create MongoDB admin user
           shell: |
             mongosh admin --eval "db.createUser({user: '{{ db_admin_user }}', pwd: '{{ db_admin_password }}', roles: [{role: 'root', db: 'admin'}]})"
           register: mongodb_user_result
-          failed_when: mongodb_user_result.rc != 0 and ("already exists" not in (mongodb_user_result.stdout + mongodb_user_result.stderr))
-          changed_when: "already exists" not in (mongodb_user_result.stdout + mongodb_user_result.stderr)
+          failed_when: mongodb_user_result.rc != 0 and ('already exists' not in (mongodb_user_result.stdout + mongodb_user_result.stderr))
+          changed_when: "'already exists' not in (mongodb_user_result.stdout + mongodb_user_result.stderr)"
+      when:
+        - platform == 'linux'
+        - db_type == 'mongodb'
 
-        - name: Open firewall for MongoDB
-          firewalld:
-            port: "{{ db_port }}/tcp"
-            permanent: yes
-            state: enabled
-            immediate: yes
-          ignore_errors: yes
-      when: db_type == "mongodb"
+    - name: Windows | PostgreSQL not yet implemented
+      fail:
+        msg: "Windows automated installation for PostgreSQL is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'postgresql'
+
+    - name: Windows | MySQL not yet implemented
+      fail:
+        msg: "Windows automated installation for MySQL is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'mysql'
+
+    - name: Windows | MariaDB not yet implemented
+      fail:
+        msg: "Windows automated installation for MariaDB is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'mariadb'
+
+    - name: Windows | MongoDB not yet implemented
+      fail:
+        msg: "Windows automated installation for MongoDB is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'mongodb'
 
   post_tasks:
     - name: Display success message
       debug:
         msg: |
-          Database installation complete.
+          Database installation completed.
 
           Details:
+          - Platform: {{ platform }}
           - Type: {{ db_type }}
-          - Version: {{ db_version }}
           - Database Name: {{ db_name }}
           - Admin User: {{ db_admin_user }}
           - Port: {{ db_port }}
           - Data Directory: {{ data_dir }}
 
-          Connection Examples:
-          {% if db_type == "postgresql" %}
-          psql -h {{ ansible_host }} -p {{ db_port }} -U {{ db_admin_user }} -d {{ db_name }}
-          {% elif db_type in ["mysql", "mariadb"] %}
-          mysql -h {{ ansible_host }} -P {{ db_port }} -u {{ db_admin_user }} -p {{ db_name }}
-          {% elif db_type == "mongodb" %}
-          mongosh "mongodb://{{ db_admin_user }}:{{ db_admin_password }}@{{ ansible_host }}:{{ db_port }}/admin"
-          {% endif %}
