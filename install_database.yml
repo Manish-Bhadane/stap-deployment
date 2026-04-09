@@ -209,6 +209,7 @@
           dnf:
             name: mysql-community-server
             state: present
+            disable_gpg_check: true
 
         - name: Start and enable MySQL on RedHat
           systemd:
