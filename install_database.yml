@@ -176,20 +176,9 @@
         - db_type == 'postgresql'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | PostgreSQL on SUSE family
-      block:
-        - name: Install PostgreSQL packages on SUSE
-          zypper:
-            name:
-              - postgresql-server
-              - postgresql
-            state: present
-
-        - name: Start and enable PostgreSQL on SUSE
-          service:
-            name: postgresql
-            state: started
-            enabled: true
+    - name: Linux | PostgreSQL on SUSE family not yet implemented
+      fail:
+        msg: "PostgreSQL installation for SUSE is not yet implemented in this playbook."
       when:
         - platform == 'linux'
         - db_type == 'postgresql'
@@ -296,20 +285,9 @@
         - db_type == 'mariadb'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | MariaDB on SUSE family
-      block:
-        - name: Install MariaDB packages on SUSE
-          zypper:
-            name:
-              - mariadb
-              - mariadb-tools
-            state: present
-
-        - name: Start and enable MariaDB on SUSE
-          service:
-            name: mariadb
-            state: started
-            enabled: true
+    - name: Linux | MariaDB on SUSE family not yet implemented
+      fail:
+        msg: "MariaDB installation for SUSE is not yet implemented in this playbook."
       when:
         - platform == 'linux'
         - db_type == 'mariadb'
