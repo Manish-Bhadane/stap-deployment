@@ -21,6 +21,7 @@
   hosts: dynamic_targets
   gather_facts: yes
   become: yes
+  become_method: su
   vars:
     collector_ip: "{{ collector_ip }}"
     install_dir: "{{ install_dir | default('/usr/local') }}"
@@ -54,6 +55,7 @@
       stat:
         path: "{{ stap_repository }}/{{ stap_installer }}"
       delegate_to: localhost
+      become: false
       register: installer_check
 
     - name: Fail if installer not found
