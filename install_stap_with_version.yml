@@ -28,7 +28,7 @@
     stap_installer: "{{ stap_installer }}"
     source_host: "{{ source_host | default('9.46.241.103') }}"
     source_user: "{{ source_user | default('root') }}"
-    source_password: "{{ source_password }}"
+    source_password: "{{ source_ssh_password }}"
     source_installer_path: "{{ source_installer_path | default('/var/stap-repository/installers/' + stap_installer) }}"
     target_installer_path: "/tmp/{{ stap_installer }}"
 
@@ -50,12 +50,12 @@
           - stap_installer | trim | length > 0
         fail_msg: "Required survey fields missing: server_ip, server_user, server_password, collector_ip, install_dir, stap_installer"
 
-    - name: Validate internal source password
+    - name: Validate injected source credential password
       assert:
         that:
           - source_password is defined
           - source_password | length > 0
-        fail_msg: "Internal variable missing: source_password. Set it in AWX Job Template Extra Variables."
+        fail_msg: "Injected credential variable missing: source_ssh_password"
 
     - name: Ensure sshpass is installed on target
       package:
