@@ -29,7 +29,7 @@
     source_host: "{{ source_host | default('9.46.241.103') }}"
     source_user: "{{ source_user | default('root') }}"
     source_password: "{{ source_ssh_password }}"
-    source_installer_path: "{{ source_installer_path | default('/var/stap-repository/installers/' + stap_installer) }}"
+    source_installer_path: "{{ source_installer_path | default('') }}"
     target_installer_path: "/tmp/{{ stap_installer }}"
 
   pre_tasks:
@@ -62,6 +62,10 @@
         name: sshpass
         state: present
 
+    - name: Set default source installer path
+      set_fact:
+        resolved_source_installer_path: "{{ source_installer_path if (source_installer_path | length > 0) else '/var/stap-repository/installers/' ~ stap_installer }}"
+
   tasks:
     - name: Display selected installer
       debug:
@@ -77,7 +81,7 @@
       shell: >
         sshpass -p '{{ source_password }}'
         scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        {{ source_user }}@{{ source_host }}:{{ source_installer_path }}
+        {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
         {{ target_installer_path }}
       args:
         creates: "{{ target_installer_path }}"
