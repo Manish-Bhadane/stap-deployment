@@ -93,26 +93,14 @@
         mode: '0755'
         state: file
 
-    - name: Extract S-TAP installer without executing
+    - name: Run S-TAP installer using supported shell wrapper flow
       shell: |
-        rm -rf /tmp/stap_extract
-        mkdir -p /tmp/stap_extract
-        {{ target_installer_path }} --noexec --target /tmp/stap_extract
+        cd /tmp
+        {{ target_installer_path }} --ni --dir {{ install_dir }} --tapip {{ ansible_host }} --sqlguardip {{ collector_ip }}
       args:
-        creates: /tmp/stap_extract/bin/guard-stap-setup
-      register: extract_result
-
-    - name: Run embedded S-TAP setup in non-interactive mode
-      shell: |
-        /tmp/stap_extract/bin/guard-stap-setup \
-          --ni \
-          --rootinst \
-          --dir {{ install_dir }} \
-          --sqlguardip {{ collector_ip }} \
-          --tapip {{ ansible_host }}
-      args:
-        creates: /opt/guardium/guard_stap
+        creates: /usr/local/guardium/guard_stap
       register: install_result
+
 
     - name: Display installation result
       debug:
