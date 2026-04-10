@@ -114,16 +114,6 @@
       args:
         creates: /opt/guardium/guard_stap
       register: install_result
-|
-        {{ target_installer_path }} \
-          --collector {{ collector_ip }} \
-          --install_dir {{ install_dir }} \
-          --accept-license \
-          --enable-service \
-          --start-service
-      args:
-        creates: /opt/guardium/guard_stap
-      register: install_result
 
     - name: Display installation result
       debug:
