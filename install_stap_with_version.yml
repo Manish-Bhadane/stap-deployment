@@ -29,7 +29,7 @@
     source_host: "{{ source_host | default('9.46.241.103') }}"
     source_user: "{{ source_user | default('root') }}"
     source_password: "{{ source_ssh_password }}"
-    source_installer_path: "{{ source_installer_path | default('') }}"
+    source_installer_path: ""
     target_installer_path: "/tmp/{{ stap_installer }}"
 
   pre_tasks:
@@ -64,7 +64,7 @@
 
     - name: Set default source installer path
       set_fact:
-        resolved_source_installer_path: "{{ source_installer_path if (source_installer_path | length > 0) else '/var/stap-repository/installers/' ~ stap_installer }}"
+        resolved_source_installer_path: "{{ '/var/stap-repository/installers/' ~ stap_installer if (source_installer_path | length == 0) else source_installer_path }}"
 
   tasks:
     - name: Display selected installer
