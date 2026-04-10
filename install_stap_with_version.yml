@@ -17,7 +17,7 @@
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no"
         ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no"
 
-- name: Install S-TAP with Shell Installer
+- name: Install S-TAP with Shell Installer via SCP
   hosts: dynamic_targets
   gather_facts: yes
   become: yes
@@ -26,7 +26,11 @@
     collector_ip: "{{ collector_ip }}"
     install_dir: "{{ install_dir | default('/usr/local') }}"
     stap_installer: "{{ stap_installer }}"
-    stap_repository: "/var/stap-repository/installers"
+    source_host: "{{ source_host }}"
+    source_user: "{{ source_user }}"
+    source_password: "{{ source_password }}"
+    source_installer_path: "{{ source_installer_path }}"
+    target_installer_path: "/tmp/{{ stap_installer }}"
 
   pre_tasks:
     - name: Validate required inputs
@@ -44,24 +48,25 @@
           - install_dir | trim | length > 0
           - stap_installer is defined
           - stap_installer | trim | length > 0
-        fail_msg: "Required survey fields missing: server_ip, server_user, server_password, collector_ip, install_dir, stap_installer"
+          - source_host is defined
+          - source_host | trim | length > 0
+          - source_user is defined
+          - source_user | length > 0
+          - source_password is defined
+          - source_password | length > 0
+          - source_installer_path is defined
+          - source_installer_path | trim | length > 0
+        fail_msg: "Required survey fields missing: server_ip, server_user, server_password, collector_ip, install_dir, stap_installer, source_host, source_user, source_password, source_installer_path"
+
+    - name: Ensure sshpass is installed on target
+      package:
+        name: sshpass
+        state: present
 
   tasks:
     - name: Display selected installer
       debug:
-        msg: "Installing S-TAP using {{ stap_installer }}"
-
-    - name: Check if installer exists locally
-      stat:
-        path: "{{ stap_repository }}/{{ stap_installer }}"
-      delegate_to: localhost
-      become: false
-      register: installer_check
-
-    - name: Fail if installer not found
-      fail:
-        msg: "ERROR: Installer {{ stap_installer }} not found in {{ stap_repository }}"
-      when: not installer_check.stat.exists
+        msg: "Installing S-TAP using {{ stap_installer }} from {{ source_host }}"
 
     - name: Ensure installation directory exists
       file:
@@ -69,15 +74,25 @@
         state: directory
         mode: '0755'
 
-    - name: Copy S-TAP installer to target
-      copy:
-        src: "{{ stap_repository }}/{{ stap_installer }}"
-        dest: "/tmp/{{ stap_installer }}"
+    - name: Copy S-TAP installer from source host to target via scp
+      shell: >
+        sshpass -p '{{ source_password }}'
+        scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ source_user }}@{{ source_host }}:{{ source_installer_path }}
+        {{ target_installer_path }}
+      args:
+        creates: "{{ target_installer_path }}"
+      register: scp_result
+
+    - name: Ensure installer is executable
+      file:
+        path: "{{ target_installer_path }}"
         mode: '0755'
+        state: file
 
     - name: Run S-TAP shell installer
       shell: |
-        /tmp/{{ stap_installer }} \
+        {{ target_installer_path }} \
           --collector {{ collector_ip }} \
           --install_dir {{ install_dir }} \
           --accept-license \
