@@ -109,8 +109,7 @@
           --rootinst \
           --dir {{ install_dir }} \
           --sqlguardip {{ collector_ip }} \
-          --tapip {{ ansible_host }} \
-          -k
+          --tapip {{ ansible_host }}
       args:
         creates: /opt/guardium/guard_stap
       register: install_result
