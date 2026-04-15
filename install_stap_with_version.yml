@@ -108,7 +108,7 @@
 
     - name: Verify S-TAP service
       systemd:
-        name: guard_stap
+        name: guard_utap
         state: started
         enabled: yes
       register: service_status
