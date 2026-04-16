@@ -176,9 +176,45 @@
         - db_type == 'postgresql'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | PostgreSQL on SUSE family not yet implemented
-      fail:
-        msg: "PostgreSQL installation for SUSE is not yet implemented in this playbook."
+    - name: Linux | PostgreSQL on SUSE family
+      block:
+        - name: Install PostgreSQL packages on SUSE
+          zypper:
+            name:
+              - postgresql-server
+              - postgresql
+            state: present
+            update_cache: true
+
+        - name: Ensure PostgreSQL data parent directory exists on SUSE
+          file:
+            path: /var/lib/pgsql
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: "0755"
+
+        - name: Initialize PostgreSQL database on SUSE
+          command: postgresql-setup --initdb
+          args:
+            creates: /var/lib/pgsql/data/PG_VERSION
+
+        - name: Configure PostgreSQL listen_addresses on SUSE
+          lineinfile:
+            path: /var/lib/pgsql/data/postgresql.conf
+            regexp: '^#?listen_addresses\s*='
+            line: "listen_addresses = '*'"
+
+        - name: Configure PostgreSQL client authentication on SUSE
+          lineinfile:
+            path: /var/lib/pgsql/data/pg_hba.conf
+            line: "host    all             all             0.0.0.0/0               md5"
+
+        - name: Start and enable PostgreSQL on SUSE
+          systemd:
+            name: postgresql
+            state: started
+            enabled: true
       when:
         - platform == 'linux'
         - db_type == 'postgresql'
@@ -509,3 +545,4 @@
           - Port: {{ db_port }}
           - Data Directory: {{ data_dir }}
 
+# Made with Bob
