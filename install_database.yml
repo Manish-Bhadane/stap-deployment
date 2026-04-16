@@ -178,13 +178,14 @@
 
     - name: Linux | PostgreSQL on SUSE family
       block:
+        - name: Refresh zypper cache on SUSE
+          command: zypper --gpg-auto-import-keys refresh
+          changed_when: false
+
         - name: Install PostgreSQL packages on SUSE
-          zypper:
-            name:
-              - postgresql-server
-              - postgresql
-            state: present
-            update_cache: true
+          command: zypper --non-interactive install -y postgresql-server postgresql
+          args:
+            creates: /usr/bin/psql
 
         - name: Ensure PostgreSQL data parent directory exists on SUSE
           file:
