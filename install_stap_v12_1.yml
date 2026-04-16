@@ -1,0 +1,118 @@
+---
+- name: Setup Dynamic Target Host
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add target server dynamically
+      add_host:
+        name: dynamic_stap_target
+        groups: dynamic_targets
+        ansible_host: "{{ server_ip | trim }}"
+        ansible_user: "{{ server_user }}"
+        ansible_password: "{{ server_password }}"
+        ansible_ssh_pass: "{{ server_password }}"
+        ansible_become_password: "{{ server_password }}"
+        ansible_connection: ssh
+        ansible_shell_type: sh
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no"
+        ansible_ssh_extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no"
+
+- name: Install S-TAP with Shell Installer via SCP
+  hosts: dynamic_targets
+  gather_facts: yes
+  become: yes
+  become_method: su
+  vars:
+    collector_ip: "{{ collector_ip }}"
+    install_dir: "{{ install_dir | default('/usr/local') }}"
+    stap_installer: "{{ stap_installer }}"
+    source_host: "{{ source_host | default('9.46.241.103') }}"
+    source_user: "{{ source_user | default('root') }}"
+    source_password: "{{ source_ssh_password }}"
+    source_installer_path: ""
+    target_installer_path: "/tmp/{{ stap_installer }}"
+
+  pre_tasks:
+    - name: Validate required user inputs
+      assert:
+        that:
+          - server_ip is defined
+          - server_ip | trim | length > 0
+          - server_user is defined
+          - server_user | length > 0
+          - server_password is defined
+          - server_password | length > 0
+          - collector_ip is defined
+          - collector_ip | trim | length > 0
+          - install_dir is defined
+          - install_dir | trim | length > 0
+          - stap_installer is defined
+          - stap_installer | trim | length > 0
+        fail_msg: "Required survey fields missing: server_ip, server_user, server_password, collector_ip, install_dir, stap_installer"
+
+    - name: Validate injected source credential password
+      assert:
+        that:
+          - source_password is defined
+          - source_password | length > 0
+        fail_msg: "Injected credential variable missing: source_ssh_password"
+
+    - name: Ensure sshpass is installed on target
+      package:
+        name: sshpass
+        state: present
+
+    - name: Set default source installer path
+      set_fact:
+        resolved_source_installer_path: "{{ '/var/stap-repository/installers/v12.1/' ~ stap_installer if (source_installer_path | length == 0) else source_installer_path }}"
+
+  tasks:
+    - name: Display selected installer
+      debug:
+        msg: "Installing S-TAP using {{ stap_installer }} from {{ source_host }}"
+
+    - name: Ensure installation directory exists
+      file:
+        path: "{{ install_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy S-TAP installer from source host to target via scp
+      shell: >
+        sshpass -p '{{ source_password }}'
+        scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
+        {{ target_installer_path }}
+      args:
+        creates: "{{ target_installer_path }}"
+      register: scp_result
+
+    - name: Ensure installer is executable
+      file:
+        path: "{{ target_installer_path }}"
+        mode: '0755'
+        state: file
+
+    - name: Run S-TAP installer using supported shell wrapper flow
+      shell: |
+        cd /tmp
+        {{ target_installer_path }} --ni --dir {{ install_dir }} --tapip {{ ansible_host }} --sqlguardip {{ collector_ip }}
+      args:
+        creates: /usr/local/guardium/guard_stap
+      register: install_result
+
+
+    - name: Display installation result
+      debug:
+        var: install_result.stdout_lines
+
+    - name: Verify S-TAP service
+      systemd:
+        name: guard_utap
+        state: started
+        enabled: yes
+      register: service_status
+
+    - name: Display success message
+      debug:
+        msg: "✅ S-TAP successfully installed using {{ stap_installer }}"
