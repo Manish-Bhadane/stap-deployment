@@ -83,8 +83,6 @@
         scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
         {{ target_installer_path }}
-      args:
-        creates: "{{ target_installer_path }}"
       register: scp_result
 
     - name: Ensure installer is executable
