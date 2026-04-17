@@ -359,6 +359,12 @@
         - name: Initialize MariaDB database on SUSE
           command: "{{ mariadb_server_binary.stdout }} --initialize-insecure --user=mysql --datadir=/var/lib/mysql"
           args:
+            creates: /var/lib/mysql/ibdata1
+          failed_when: false
+
+        - name: Ensure MariaDB system database tables exist on SUSE
+          command: mariadb-install-db --user=mysql --datadir=/var/lib/mysql
+          args:
             creates: /var/lib/mysql/mysql
 
         - name: Detect MariaDB service name on SUSE
