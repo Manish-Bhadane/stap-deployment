@@ -142,7 +142,18 @@
         - ansible_distribution == 'Ubuntu'
         - debian_sources_file.stdout | length > 0
 
-    - name: Linux | Update apt cache after Ubuntu HTTPS source normalization
+    - name: Linux | Ensure Ubuntu universe component is enabled
+      replace:
+        path: "{{ debian_sources_file.stdout }}"
+        regexp: '^Components:\s+main$'
+        replace: 'Components: main universe'
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - debian_sources_file.stdout | length > 0
+
+    - name: Linux | Update apt cache after Ubuntu repository normalization
       apt:
         update_cache: true
       when:
