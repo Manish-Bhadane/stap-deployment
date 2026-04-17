@@ -553,16 +553,34 @@
             state: present
             update_cache: true
 
-        - name: Add MongoDB apt key on Debian
-          apt_key:
+        - name: Download MongoDB server 7.0 apt key on Debian
+          get_url:
             url: "https://pgp.mongodb.com/server-7.0.asc"
-            state: present
+            dest: /usr/share/keyrings/mongodb-server-7.0.asc
+            mode: "0644"
 
-        - name: Add MongoDB apt repository on Debian
+        - name: Dearmor MongoDB server 7.0 apt key on Debian
+          command: >-
+            gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+            /usr/share/keyrings/mongodb-server-7.0.asc
+          args:
+            creates: /usr/share/keyrings/mongodb-server-7.0.gpg
+
+        - name: Add MongoDB apt repository on Debian for Ubuntu 24+
           apt_repository:
-            repo: "deb [ arch=amd64 ] https://repo.mongodb.org/apt/{{ ansible_distribution | lower }} {{ ansible_distribution_release }}/mongodb-org/7.0 multiverse"
+            repo: "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse"
             state: present
             filename: mongodb-org-7.0
+          when:
+            - ansible_distribution == 'Ubuntu'
+            - ansible_distribution_major_version | int >= 24
+
+        - name: Add MongoDB apt repository on Debian using native release
+          apt_repository:
+            repo: "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/{{ ansible_distribution | lower }} {{ ansible_distribution_release }}/mongodb-org/7.0 multiverse"
+            state: present
+            filename: mongodb-org-7.0
+          when: not (ansible_distribution == 'Ubuntu' and ansible_distribution_major_version | int >= 24)
 
         - name: Install MongoDB packages on Debian
           apt:
