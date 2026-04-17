@@ -286,9 +286,9 @@
         - db_type == 'mysql'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | MySQL on SUSE family not yet implemented
+    - name: Linux | MySQL on SUSE family
       fail:
-        msg: "MySQL installation for SUSE is not yet implemented in this playbook."
+        msg: "Native MySQL server packages are not available in the currently enabled SUSE repositories on this host. Use db_type=mariadb for SUSE, or enable a MySQL repository/module first."
       when:
         - platform == 'linux'
         - db_type == 'mysql'
@@ -332,9 +332,45 @@
         - db_type == 'mariadb'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | MariaDB on SUSE family not yet implemented
-      fail:
-        msg: "MariaDB installation for SUSE is not yet implemented in this playbook."
+    - name: Linux | MariaDB on SUSE family
+      block:
+        - name: Refresh zypper cache on SUSE for MariaDB
+          command: zypper --gpg-auto-import-keys refresh
+          changed_when: false
+
+        - name: Install MariaDB packages on SUSE
+          command: zypper --non-interactive install -y mariadb mariadb-client mariadb-tools
+          args:
+            creates: /usr/bin/mariadb
+
+        - name: Detect MariaDB server binary path on SUSE
+          shell: "command -v mariadbd || command -v mysqld"
+          register: mariadb_server_binary
+          changed_when: false
+
+        - name: Ensure MariaDB data directory exists on SUSE
+          file:
+            path: /var/lib/mysql
+            state: directory
+            owner: mysql
+            group: mysql
+            mode: "0755"
+
+        - name: Initialize MariaDB database on SUSE
+          command: "{{ mariadb_server_binary.stdout }} --initialize-insecure --user=mysql --datadir=/var/lib/mysql"
+          args:
+            creates: /var/lib/mysql/mysql
+
+        - name: Detect MariaDB service name on SUSE
+          shell: "systemctl list-unit-files | awk '/^(mariadb|mysql)\\.service/ {print $1; exit}'"
+          register: mariadb_service_name
+          changed_when: false
+
+        - name: Start and enable MariaDB on SUSE
+          systemd:
+            name: "{{ mariadb_service_name.stdout | default('mariadb.service') }}"
+            state: started
+            enabled: true
       when:
         - platform == 'linux'
         - db_type == 'mariadb'
@@ -417,9 +453,9 @@
         - db_type == 'mongodb'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | MongoDB on SUSE not yet implemented
+    - name: Linux | MongoDB on SUSE
       fail:
-        msg: "MongoDB installation for SUSE is not yet implemented in this playbook."
+        msg: "MongoDB server packages are not available in the currently enabled SUSE repositories on this host. Enable the required SUSE module/repository or external MongoDB repository first."
       when:
         - platform == 'linux'
         - db_type == 'mongodb'
