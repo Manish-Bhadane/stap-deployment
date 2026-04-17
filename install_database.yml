@@ -460,8 +460,35 @@
         - ansible_os_family == 'Debian'
 
     - name: Linux | MongoDB on SUSE
-      fail:
-        msg: "MongoDB server packages are not available in the currently enabled SUSE repositories on this host. Enable the required SUSE module/repository or external MongoDB repository first."
+      block:
+        - name: Refresh zypper cache on SUSE for MongoDB
+          command: zypper --gpg-auto-import-keys refresh
+          changed_when: false
+
+        - name: Install MongoDB packages on SUSE
+          command: zypper --non-interactive install -y mongodb-org
+          args:
+            creates: /usr/bin/mongod
+
+        - name: Ensure MongoDB data directory exists on SUSE
+          file:
+            path: /var/lib/mongo
+            state: directory
+            owner: mongod
+            group: mongod
+            mode: "0755"
+
+        - name: Configure MongoDB bind IP on SUSE
+          lineinfile:
+            path: /etc/mongod.conf
+            regexp: '^\s*bindIp:\s*'
+            line: '  bindIp: 0.0.0.0'
+
+        - name: Start and enable MongoDB on SUSE
+          systemd:
+            name: mongod
+            state: started
+            enabled: true
       when:
         - platform == 'linux'
         - db_type == 'mongodb'
