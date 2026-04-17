@@ -122,6 +122,70 @@
           Data Directory: {{ data_dir }}
 
   tasks:
+    - name: Linux | Detect deb822 Ubuntu source file
+      shell: "ls /etc/apt/sources.list.d/*.sources 2>/dev/null | head -1"
+      register: debian_sources_file
+      changed_when: false
+      failed_when: false
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | Switch Ubuntu apt sources from HTTP to HTTPS
+      replace:
+        path: "{{ debian_sources_file.stdout }}"
+        regexp: 'http://(archive|security)\\.ubuntu\\.com/ubuntu/'
+        replace: 'https://\\1.ubuntu.com/ubuntu/'
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - debian_sources_file.stdout | length > 0
+
+    - name: Linux | Update apt cache after Ubuntu HTTPS source normalization
+      apt:
+        update_cache: true
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+
+    - name: Linux | Verify Ubuntu main repository is reachable over HTTPS
+      uri:
+        url: "https://archive.ubuntu.com/ubuntu/dists/{{ ansible_distribution_release }}/InRelease"
+        method: HEAD
+        timeout: 15
+        status_code: 200
+      register: ubuntu_main_repo_check
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+
+    - name: Linux | Verify Ubuntu security repository is reachable over HTTPS
+      uri:
+        url: "https://security.ubuntu.com/ubuntu/dists/{{ ansible_distribution_release }}-security/InRelease"
+        method: HEAD
+        timeout: 15
+        status_code: 200
+      register: ubuntu_security_repo_check
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+
+    - name: Linux | Fail fast when Ubuntu package repositories are unreachable
+      fail:
+        msg: >-
+          Ubuntu package repositories are not reachable from this target.
+          Automated installation requires outbound HTTPS access to archive.ubuntu.com
+          and security.ubuntu.com, or equivalent internal mirror configuration.
+      when:
+        - platform == 'linux'
+        - ansible_os_family == 'Debian'
+        - ansible_distribution == 'Ubuntu'
+        - ubuntu_main_repo_check is failed or ubuntu_security_repo_check is failed
+
     - name: Linux | PostgreSQL on RedHat family
       block:
         - name: Install PostgreSQL packages on RedHat
