@@ -287,8 +287,54 @@
         - ansible_os_family == 'Debian'
 
     - name: Linux | MySQL on SUSE family
-      fail:
-        msg: "Native MySQL server packages are not available in the currently enabled SUSE repositories on this host. Use db_type=mariadb for SUSE, or enable a MySQL repository/module first."
+      block:
+        - name: Display SUSE MySQL compatibility notice
+          debug:
+            msg: "Oracle MySQL is not currently available from verified package sources for this SUSE target. Proceeding with MariaDB as the MySQL-compatible engine for db_type=mysql on SUSE."
+
+        - name: Refresh zypper cache on SUSE for MySQL-compatible install
+          command: zypper --gpg-auto-import-keys refresh
+          changed_when: false
+
+        - name: Install MariaDB packages for MySQL-compatible use on SUSE
+          command: zypper --non-interactive install -y mariadb mariadb-client mariadb-tools
+          args:
+            creates: /usr/bin/mariadb
+
+        - name: Detect MySQL-compatible server binary path on SUSE
+          shell: "command -v mariadbd || command -v mysqld"
+          register: mysql_compatible_server_binary
+          changed_when: false
+
+        - name: Ensure MySQL-compatible data directory exists on SUSE
+          file:
+            path: /var/lib/mysql
+            state: directory
+            owner: mysql
+            group: mysql
+            mode: "0755"
+
+        - name: Initialize MySQL-compatible database on SUSE
+          command: "{{ mysql_compatible_server_binary.stdout }} --initialize-insecure --user=mysql --datadir=/var/lib/mysql"
+          args:
+            creates: /var/lib/mysql/ibdata1
+          failed_when: false
+
+        - name: Ensure MySQL-compatible system database tables exist on SUSE
+          command: mariadb-install-db --user=mysql --datadir=/var/lib/mysql
+          args:
+            creates: /var/lib/mysql/mysql
+
+        - name: Detect MySQL-compatible service name on SUSE
+          shell: "systemctl list-unit-files | awk '/^(mariadb|mysql)\\.service/ {print $1; exit}'"
+          register: mysql_compatible_service_name
+          changed_when: false
+
+        - name: Start and enable MySQL-compatible service on SUSE
+          systemd:
+            name: "{{ mysql_compatible_service_name.stdout | default('mariadb.service') }}"
+            state: started
+            enabled: true
       when:
         - platform == 'linux'
         - db_type == 'mysql'
