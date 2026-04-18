@@ -57,10 +57,24 @@
           - source_password | length > 0
         fail_msg: "Injected credential variable missing: source_ssh_password"
 
-    - name: Ensure sshpass is installed on target
+    - name: Ensure sshpass is installed on RedHat family target
       package:
         name: sshpass
         state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure sshpass is installed on Debian family target
+      apt:
+        name: sshpass
+        state: present
+        update_cache: true
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure sshpass is installed on SUSE family target
+      command: zypper --non-interactive install -y sshpass
+      args:
+        creates: /usr/bin/sshpass
+      when: ansible_os_family == 'Suse'
 
     - name: Set default source installer path
       set_fact:
