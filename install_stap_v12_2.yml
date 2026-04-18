@@ -70,11 +70,40 @@
         update_cache: true
       when: ansible_os_family == 'Debian'
 
-    - name: Ensure sshpass is installed on SUSE family target
+    - name: Check whether sshpass already exists on SUSE family target
+      stat:
+        path: /usr/bin/sshpass
+      register: suse_sshpass_binary
+      when: ansible_os_family == 'Suse'
+
+    - name: Search sshpass package in enabled SUSE repositories
+      command: zypper --non-interactive search -s sshpass
+      register: suse_sshpass_search
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_os_family == 'Suse'
+        - not suse_sshpass_binary.stat.exists
+
+    - name: Ensure sshpass is installed on SUSE family target when package exists
       command: zypper --non-interactive install -y sshpass
       args:
         creates: /usr/bin/sshpass
-      when: ansible_os_family == 'Suse'
+      when:
+        - ansible_os_family == 'Suse'
+        - not suse_sshpass_binary.stat.exists
+        - "'No matching items found.' not in (suse_sshpass_search.stdout | default(''))"
+
+    - name: Fail when sshpass is unavailable in enabled SUSE repositories
+      fail:
+        msg: >-
+          sshpass is not available on this SUSE target. Enabled repos do not provide it.
+          Either enable a repository/module that contains sshpass, preinstall /usr/bin/sshpass on the target,
+          or refactor the copy method to avoid target-side sshpass.
+      when:
+        - ansible_os_family == 'Suse'
+        - not suse_sshpass_binary.stat.exists
+        - "'No matching items found.' in (suse_sshpass_search.stdout | default(''))"
 
     - name: Set default source installer path
       set_fact:
