@@ -57,14 +57,28 @@
           - source_password | length > 0
         fail_msg: "Injected credential variable missing: source_ssh_password"
 
-    - name: Ensure sshpass is installed on target
+    - name: Ensure sshpass is installed on RedHat family target
       package:
         name: sshpass
         state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Ensure sshpass is installed on Debian family target
+      apt:
+        name: sshpass
+        state: present
+        update_cache: true
+      when: ansible_os_family == 'Debian'
+
+    - name: Ensure sshpass is installed on SUSE family target
+      command: zypper --non-interactive install -y sshpass
+      args:
+        creates: /usr/bin/sshpass
+      when: ansible_os_family == 'Suse'
 
     - name: Set default source installer path
       set_fact:
-        resolved_source_installer_path: "{{ '/var/stap-repository/installers/' ~ stap_installer if (source_installer_path | length == 0) else source_installer_path }}"
+        resolved_source_installer_path: "{{ source_installer_path if (source_installer_path | length > 0) else '/var/stap-repository/installers/' ~ stap_installer }}"
 
   tasks:
     - name: Display selected installer
@@ -101,18 +115,17 @@
         creates: /usr/local/guardium/guard_stap
       register: install_result
 
-
     - name: Display installation result
       debug:
         var: install_result.stdout_lines
 
-    - name: Verify S-TAP service
-      systemd:
-        name: guard_utap
-        state: started
-        enabled: yes
+    - name: Verify S-TAP process is present
+      shell: pgrep -a guard_stap
       register: service_status
+      changed_when: false
 
     - name: Display success message
       debug:
         msg: "✅ S-TAP successfully installed using {{ stap_installer }}"
+
+# Made with Bob
