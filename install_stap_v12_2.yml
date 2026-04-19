@@ -57,57 +57,18 @@
           - source_password | length > 0
         fail_msg: "Injected credential variable missing: source_ssh_password"
 
-    - name: Ensure sshpass is installed on RedHat family target
-      package:
-        name: sshpass
-        state: present
-      when: ansible_os_family == 'RedHat'
-
-    - name: Ensure sshpass is installed on Debian family target
-      apt:
-        name: sshpass
-        state: present
-        update_cache: true
-      when: ansible_os_family == 'Debian'
-
-    - name: Check whether sshpass already exists on SUSE family target
-      stat:
-        path: /usr/bin/sshpass
-      register: suse_sshpass_binary
-      when: ansible_os_family == 'Suse'
-
-    - name: Search sshpass package in enabled SUSE repositories
-      command: zypper --non-interactive search -s sshpass
-      register: suse_sshpass_search
-      changed_when: false
-      failed_when: false
-      when:
-        - ansible_os_family == 'Suse'
-        - not suse_sshpass_binary.stat.exists
-
-    - name: Ensure sshpass is installed on SUSE family target when package exists
-      command: zypper --non-interactive install -y sshpass
-      args:
-        creates: /usr/bin/sshpass
-      when:
-        - ansible_os_family == 'Suse'
-        - not suse_sshpass_binary.stat.exists
-        - "'No matching items found.' not in (suse_sshpass_search.stdout | default(''))"
-
-    - name: Fail when sshpass is unavailable in enabled SUSE repositories
-      fail:
-        msg: >-
-          sshpass is not available on this SUSE target. Enabled repos do not provide it.
-          Either enable a repository/module that contains sshpass, preinstall /usr/bin/sshpass on the target,
-          or refactor the copy method to avoid target-side sshpass.
-      when:
-        - ansible_os_family == 'Suse'
-        - not suse_sshpass_binary.stat.exists
-        - "'No matching items found.' in (suse_sshpass_search.stdout | default(''))"
-
     - name: Set default source installer path
       set_fact:
         resolved_source_installer_path: "{{ '/var/stap-repository/installers/v12.2/' ~ stap_installer if (source_installer_path | length == 0) else source_installer_path }}"
+
+    - name: Create local temporary directory for installer staging on non-RedHat targets
+      delegate_to: localhost
+      become: false
+      tempfile:
+        state: directory
+        prefix: awx-stap-v12_2-
+      register: local_installer_stage
+      when: ansible_os_family != 'RedHat'
 
   tasks:
     - name: Display selected installer
@@ -120,13 +81,34 @@
         state: directory
         mode: '0755'
 
-    - name: Copy S-TAP installer from source host to target via scp
+    - name: Copy S-TAP installer from source host to target via scp on RedHat
       shell: >
         sshpass -p '{{ source_password }}'
         scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
         {{ target_installer_path }}
       register: scp_result
+      when: ansible_os_family == 'RedHat'
+
+    - name: Copy S-TAP installer from source host to AWX execution node on non-RedHat targets
+      delegate_to: localhost
+      become: false
+      shell: >
+        sshpass -p '{{ source_password }}'
+        scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
+        {{ local_installer_stage.path }}/{{ stap_installer }}
+      register: source_scp_result
+      changed_when: true
+      when: ansible_os_family != 'RedHat'
+
+    - name: Copy S-TAP installer from AWX execution node to target on non-RedHat targets
+      copy:
+        src: "{{ local_installer_stage.path }}/{{ stap_installer }}"
+        dest: "{{ target_installer_path }}"
+        mode: '0755'
+      register: target_copy_result
+      when: ansible_os_family != 'RedHat'
 
     - name: Ensure installer is executable
       file:
@@ -157,3 +139,15 @@
     - name: Display success message
       debug:
         msg: "✅ S-TAP successfully installed using {{ stap_installer }}"
+
+  post_tasks:
+    - name: Remove local temporary installer staging directory
+      delegate_to: localhost
+      become: false
+      file:
+        path: "{{ local_installer_stage.path }}"
+        state: absent
+      when:
+        - ansible_os_family != 'RedHat'
+        - local_installer_stage is defined
+        - local_installer_stage.path is defined
