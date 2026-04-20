@@ -74,14 +74,13 @@
       set_fact:
         resolved_source_installer_path: "{{ '/var/gim-repository/installers/v12.2/' ~ gim_installer if (source_installer_path | length == 0) else source_installer_path }}"
 
-    - name: Create local temporary directory for installer staging on non-RedHat targets
+    - name: Create local temporary directory for installer staging
       delegate_to: localhost
       become: false
       tempfile:
         state: directory
         prefix: awx-gim-v12_2-
       register: local_installer_stage
-      when: ansible_os_family != 'RedHat'
 
   tasks:
     - name: Display selected installer
@@ -94,16 +93,7 @@
         state: directory
         mode: '0755'
 
-    - name: Copy GIM installer from source host to target via scp on RedHat
-      shell: >
-        sshpass -p '{{ source_password }}'
-        scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        {{ source_user }}@{{ source_host }}:{{ resolved_source_installer_path }}
-        {{ target_installer_path }}
-      register: scp_result
-      when: ansible_os_family == 'RedHat'
-
-    - name: Copy GIM installer from source host to AWX execution node on non-RedHat targets
+    - name: Copy GIM installer from source host to AWX execution node
       delegate_to: localhost
       become: false
       shell: >
@@ -113,15 +103,13 @@
         {{ local_installer_stage.path }}/{{ gim_installer }}
       register: source_scp_result
       changed_when: true
-      when: ansible_os_family != 'RedHat'
 
-    - name: Copy GIM installer from AWX execution node to target on non-RedHat targets
+    - name: Copy GIM installer from AWX execution node to target
       copy:
         src: "{{ local_installer_stage.path }}/{{ gim_installer }}"
         dest: "{{ target_installer_path }}"
         mode: '0755'
       register: target_copy_result
-      when: ansible_os_family != 'RedHat'
 
     - name: Ensure installer is executable
       file:
@@ -192,7 +180,6 @@
         path: "{{ local_installer_stage.path }}"
         state: absent
       when:
-        - ansible_os_family != 'RedHat'
         - local_installer_stage is defined
         - local_installer_stage.path is defined
 
