@@ -26,8 +26,8 @@
     install_dir: "{{ install_dir | default('/opt/Guardium/') }}"
     perl_dir: "{{ perl_dir | default('/usr/bin/') }}"
     listener_mode_enabled: "{{ listener_mode | default(false) | bool }}"
-    failover_sqlguardip: "{{ failover_sqlguardip | default('') }}"
-    shared_secret: "{{ shared_secret | default('') }}"
+    failover_sqlguardip_value: "{{ failover_sqlguardip | default('') }}"
+    shared_secret_value: "{{ shared_secret | default('') }}"
     source_host: "{{ source_host | default('9.46.241.103') }}"
     source_user: "{{ source_user | default('root') }}"
     source_password: "{{ source_ssh_password }}"
@@ -124,11 +124,11 @@
           {% if not listener_mode_enabled -%}
           {% set _ = parts.append('--sqlguardip ' ~ sqlguard_ip) -%}
           {% endif -%}
-          {% if failover_sqlguardip | trim | length > 0 -%}
-          {% set _ = parts.append('--failover_sqlguardip ' ~ failover_sqlguardip) -%}
+          {% if failover_sqlguardip_value | trim | length > 0 -%}
+          {% set _ = parts.append('--failover_sqlguardip ' ~ failover_sqlguardip_value) -%}
           {% endif -%}
-          {% if shared_secret | trim | length > 0 -%}
-          {% set _ = parts.append('--shared_secret ' ~ shared_secret) -%}
+          {% if shared_secret_value | trim | length > 0 -%}
+          {% set _ = parts.append('--shared_secret ' ~ shared_secret_value) -%}
           {% endif -%}
           {{ parts | join(' ') }}
 
