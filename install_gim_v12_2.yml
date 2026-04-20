@@ -23,11 +23,9 @@
   become: yes
   become_method: su
   vars:
-    sqlguard_ip: "{{ sqlguard_ip }}"
     install_dir: "{{ install_dir | default('/opt/Guardium/') }}"
     perl_dir: "{{ perl_dir | default('/usr/bin/') }}"
-    gim_installer: "{{ gim_installer }}"
-    listener_mode: "{{ listener_mode | default(false) | bool }}"
+    listener_mode_enabled: "{{ listener_mode | default(false) | bool }}"
     failover_sqlguardip: "{{ failover_sqlguardip | default('') }}"
     shared_secret: "{{ shared_secret | default('') }}"
     source_host: "{{ source_host | default('9.46.241.103') }}"
@@ -52,7 +50,7 @@
           - install_dir | trim | length > 0
           - perl_dir is defined
           - perl_dir | trim | length > 0
-          - listener_mode or (sqlguard_ip is defined and sqlguard_ip | trim | length > 0)
+          - listener_mode_enabled or (sqlguard_ip is defined and sqlguard_ip | trim | length > 0)
         fail_msg: "Required survey fields missing: server_ip, server_user, server_password, gim_installer, install_dir, perl_dir, and sqlguard_ip when listener_mode is false"
 
     - name: Validate injected source credential password
@@ -135,7 +133,7 @@
       set_fact:
         gim_optional_args: >-
           {% set parts = [] -%}
-          {% if not listener_mode -%}
+          {% if not listener_mode_enabled -%}
           {% set _ = parts.append('--sqlguardip ' ~ sqlguard_ip) -%}
           {% endif -%}
           {% if failover_sqlguardip | trim | length > 0 -%}
