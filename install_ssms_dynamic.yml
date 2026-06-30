@@ -95,7 +95,7 @@
     ssms_install_dir: "C:\\Program Files (x86)\\Microsoft SQL Server Management Studio {{ ssms_version }}"
     ssms_log_path: "C:\\Temp\\SSMS_Install_Log.txt"
     sql_config_path: "C:\\Temp\\sql_connection_config.txt"
-    install_timeout: 3600
+    install_timeout: 7200
 
   tasks:
     - name: Display target server information
@@ -246,7 +246,7 @@
         jid: "{{ install_result.ansible_job_id }}"
       register: job_result
       until: job_result.finished
-      retries: 120
+      retries: 240
       delay: 30
       when: install_result.ansible_job_id is defined
 
