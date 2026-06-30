@@ -1,0 +1,452 @@
+---
+# Clean Ansible Playbook for Installing MS SQL Server Management Studio (SSMS)
+# No system optimization - No Windows Defender disable - No service stops
+# Fully dynamic with survey input - No security alerts
+#
+# This playbook is designed to avoid triggering security software alerts
+# by not modifying system settings or disabling security features.
+#
+# Usage: Configure AWX Survey with required variables
+
+- name: Gather Dynamic Input for SSMS Installation
+  hosts: localhost
+  gather_facts: no
+  
+  vars_prompt:
+    - name: target_host
+      prompt: "Enter the Windows Server IP address or hostname"
+      private: no
+      
+    - name: windows_username
+      prompt: "Enter Windows Administrator username"
+      private: no
+      default: "Administrator"
+      
+    - name: windows_password
+      prompt: "Enter Windows Administrator password"
+      private: yes
+      
+    - name: sql_username
+      prompt: "Enter SQL Server Database username (optional - for validation)"
+      private: no
+      default: "sa"
+      
+    - name: sql_password
+      prompt: "Enter SQL Server Database password (optional - for validation)"
+      private: yes
+      
+    - name: ssms_version
+      prompt: "Enter SSMS version to install"
+      private: no
+      default: "20.2"
+      
+    - name: ssms_download_url
+      prompt: "Enter SSMS download URL"
+      private: no
+      default: "https://aka.ms/ssmsfullsetup"
+      
+    - name: restart_after_install
+      prompt: "Restart server after installation? (yes/no)"
+      private: no
+      default: "no"
+
+  tasks:
+    - name: Add target host to inventory dynamically
+      add_host:
+        name: "{{ target_host }}"
+        groups: dynamic_windows_servers
+        ansible_host: "{{ target_host }}"
+        ansible_user: "{{ windows_username }}"
+        ansible_password: "{{ windows_password }}"
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+        ssms_version: "{{ ssms_version }}"
+        ssms_download_url: "{{ ssms_download_url }}"
+        sql_db_username: "{{ sql_username }}"
+        sql_db_password: "{{ sql_password }}"
+        restart_required: "{{ restart_after_install }}"
+
+    - name: Display configuration summary
+      debug:
+        msg:
+          - "=========================================="
+          - "SSMS Installation Configuration"
+          - "=========================================="
+          - "Target Server: {{ target_host }}"
+          - "Windows User: {{ windows_username }}"
+          - "SQL DB User: {{ sql_username }}"
+          - "SSMS Version: {{ ssms_version }}"
+          - "Restart After Install: {{ restart_after_install }}"
+          - "Installation Method: Clean (No system modifications)"
+          - "Expected Time: 25-40 minutes"
+          - "=========================================="
+
+- name: Install MS SQL Server Management Studio on Windows (Clean Installation)
+  hosts: dynamic_windows_servers
+  gather_facts: yes
+  
+  vars:
+    ssms_installer_path: "C:\\Temp\\SSMS-Setup-ENU.exe"
+    ssms_install_dir: "C:\\Program Files (x86)\\Microsoft SQL Server Management Studio {{ ssms_version }}"
+    ssms_log_path: "C:\\Temp\\SSMS_Install_Log.txt"
+    sql_config_path: "C:\\Temp\\sql_connection_config.txt"
+    install_timeout: 7200
+
+  tasks:
+    - name: Display target server information
+      debug:
+        msg: 
+          - "=========================================="
+          - "Target Server: {{ inventory_hostname }}"
+          - "OS: {{ ansible_os_family }}"
+          - "OS Version: {{ ansible_os_name }}"
+          - "SSMS Version to Install: {{ ssms_version }}"
+          - "Installation Method: Clean (No optimization)"
+          - "=========================================="
+
+    - name: Test WinRM connectivity
+      win_ping:
+      register: winrm_test
+
+    - name: Display connectivity status
+      debug:
+        msg: "✅ WinRM connection successful to {{ inventory_hostname }}"
+      when: winrm_test is succeeded
+
+    - name: Ensure Temp directory exists
+      win_file:
+        path: C:\Temp
+        state: directory
+
+    - name: Check disk space before installation
+      win_shell: |
+        $freeSpace = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+        if ($freeSpace -lt 10) {
+          Write-Output "WARNING: Low disk space. Free: $freeSpace GB, Recommended: 10+ GB"
+        } else {
+          Write-Output "Disk space OK: $freeSpace GB free"
+        }
+      register: disk_check
+      changed_when: false
+
+    - name: Display disk space status
+      debug:
+        msg: "{{ disk_check.stdout_lines }}"
+
+    - name: Check if SSMS is already installed
+      win_reg_stat:
+        path: HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server Management Studio
+      register: ssms_installed
+
+    - name: Get installed SSMS version if exists
+      win_shell: |
+        $ssmsPath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio*\Common7\IDE\Ssms.exe"
+        if (Test-Path $ssmsPath) {
+          $version = (Get-Item $ssmsPath).VersionInfo.FileVersion
+          Write-Output $version
+        } else {
+          Write-Output "Not Installed"
+        }
+      register: current_ssms_version
+      changed_when: false
+      failed_when: false
+
+    - name: Display current SSMS status
+      debug:
+        msg: 
+          - "SSMS Installation Status: {{ 'Installed' if ssms_installed.exists else 'Not Installed' }}"
+          - "Current Version: {{ current_ssms_version.stdout | trim }}"
+
+    - name: End play if SSMS is already installed with correct version
+      meta: end_play
+      when: 
+        - ssms_installed.exists
+        - (current_ssms_version.stdout | trim) == ssms_version
+
+    - name: Check SQL Server service status (optional validation)
+      win_service:
+        name: MSSQLSERVER
+      register: sql_service
+      ignore_errors: yes
+
+    - name: Display SQL Server service status
+      debug:
+        msg: "SQL Server Service Status: {{ sql_service.state | default('Not Found') }}"
+
+    - name: Test SQL Server connectivity (optional validation)
+      win_shell: |
+        $serverName = "localhost"
+        $username = "{{ sql_db_username }}"
+        $password = "{{ sql_db_password }}"
+        
+        try {
+          $connectionString = "Server=$serverName;User Id=$username;Password=$password;TrustServerCertificate=True;Connection Timeout=5"
+          $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+          $connection.Open()
+          $command = $connection.CreateCommand()
+          $command.CommandText = "SELECT @@VERSION"
+          $version = $command.ExecuteScalar()
+          $connection.Close()
+          Write-Output "SUCCESS: Connected to SQL Server"
+          Write-Output $version
+          exit 0
+        } catch {
+          Write-Output "INFO: Cannot connect to SQL Server (this is OK if SQL Server not installed)"
+          Write-Output $_.Exception.Message
+          exit 0
+        }
+      register: sql_connectivity
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display SQL Server connectivity result
+      debug:
+        msg: "{{ sql_connectivity.stdout_lines }}"
+      when: sql_connectivity.stdout_lines is defined
+
+    - name: Download SSMS installer
+      win_get_url:
+        url: "{{ ssms_download_url }}"
+        dest: "{{ ssms_installer_path }}"
+        force: no
+        timeout: 900
+      register: download_result
+      when: not ssms_installed.exists or (current_ssms_version.stdout | trim) != ssms_version
+
+    - name: Display download progress
+      debug:
+        msg: 
+          - "Downloading SSMS installer..."
+          - "Source: {{ ssms_download_url }}"
+          - "Destination: {{ ssms_installer_path }}"
+          - "Size: ~600 MB"
+          - "This may take 5-10 minutes depending on internet speed"
+      when: download_result.changed
+
+    - name: Verify installer download
+      win_stat:
+        path: "{{ ssms_installer_path }}"
+      register: installer_file
+
+    - name: Display installer file info
+      debug:
+        msg:
+          - "Installer Path: {{ ssms_installer_path }}"
+          - "File Size: {{ (installer_file.stat.size / 1024 / 1024) | round(2) }} MB"
+          - "File Exists: {{ installer_file.stat.exists }}"
+      when: installer_file.stat.exists
+
+    - name: Fail if installer not found
+      fail:
+        msg: "SSMS installer not found at {{ ssms_installer_path }}"
+      when: not installer_file.stat.exists
+
+    - name: Install SSMS silently (This may take 25-40 minutes)
+      win_shell: |
+        Write-Output "Starting SSMS installation..."
+        Write-Output "Installation will take approximately 25-40 minutes"
+        Write-Output "No system optimizations applied - clean installation"
+        
+        $startTime = Get-Date
+        $process = Start-Process -FilePath "{{ ssms_installer_path }}" `
+          -ArgumentList "/install", "/quiet", "/norestart", "/log", "{{ ssms_log_path }}" `
+          -PassThru -Wait
+        
+        $endTime = Get-Date
+        $duration = ($endTime - $startTime).TotalMinutes
+        
+        Write-Output "Installation process completed"
+        Write-Output "Duration: $([math]::Round($duration, 2)) minutes"
+        Write-Output "Exit Code: $($process.ExitCode)"
+        
+        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+          Write-Output "SUCCESS: SSMS installed successfully"
+          exit 0
+        } else {
+          Write-Output "ERROR: Installation failed with exit code $($process.ExitCode)"
+          exit 1
+        }
+      register: install_result
+      async: "{{ install_timeout }}"
+      poll: 30
+      when: not ssms_installed.exists or (current_ssms_version.stdout | trim) != ssms_version
+
+    - name: Display installation status
+      debug:
+        msg: "{{ install_result.stdout_lines }}"
+      when: install_result.changed
+
+    - name: Wait for installation to complete
+      async_status:
+        jid: "{{ install_result.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 240
+      delay: 30
+      when: install_result.ansible_job_id is defined
+
+    - name: Check installation log for errors
+      win_shell: |
+        if (Test-Path "{{ ssms_log_path }}") {
+          $log = Get-Content "{{ ssms_log_path }}" -Tail 100
+          $errors = $log | Select-String -Pattern "error|failed" -CaseSensitive:$false
+          if ($errors) {
+            Write-Output "=== ERRORS FOUND IN LOG ==="
+            $errors | ForEach-Object { Write-Output $_.Line }
+          } else {
+            Write-Output "=== Installation completed successfully ==="
+            Write-Output "No errors found in installation log"
+          }
+        } else {
+          Write-Output "Log file not found at {{ ssms_log_path }}"
+        }
+      register: log_check
+      changed_when: false
+      when: install_result.changed
+
+    - name: Display installation log
+      debug:
+        msg: "{{ log_check.stdout_lines }}"
+      when: log_check.stdout_lines is defined
+
+    - name: Verify SSMS installation
+      win_shell: |
+        $ssmsPath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio*\Common7\IDE\Ssms.exe"
+        if (Test-Path $ssmsPath) {
+          $version = (Get-Item $ssmsPath).VersionInfo.FileVersion
+          $fileSize = (Get-Item $ssmsPath).Length / 1MB
+          Write-Output "SUCCESS: SSMS Version $version installed"
+          Write-Output "Executable Size: $([math]::Round($fileSize, 2)) MB"
+          Write-Output "Path: $((Get-Item $ssmsPath).FullName)"
+          exit 0
+        } else {
+          Write-Output "FAILED: SSMS installation verification failed"
+          exit 1
+        }
+      register: verify_install
+      changed_when: false
+
+    - name: Display verification result
+      debug:
+        msg: "{{ verify_install.stdout_lines }}"
+
+    - name: Create SSMS desktop shortcut
+      win_shell: |
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut("C:\Users\Public\Desktop\SQL Server Management Studio.lnk")
+        $ssmsPath = (Get-ChildItem "C:\Program Files (x86)\Microsoft SQL Server Management Studio*\Common7\IDE\Ssms.exe").FullName
+        $Shortcut.TargetPath = $ssmsPath
+        $Shortcut.Description = "Microsoft SQL Server Management Studio {{ ssms_version }}"
+        $Shortcut.WorkingDirectory = Split-Path $ssmsPath
+        $Shortcut.Save()
+        Write-Output "Desktop shortcut created successfully"
+      when: install_result.changed
+      ignore_errors: yes
+      register: desktop_shortcut
+
+    - name: Create Start Menu shortcut
+      win_shell: |
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut("C:\ProgramData\Microsoft\Windows\Start Menu\Programs\SQL Server Management Studio.lnk")
+        $ssmsPath = (Get-ChildItem "C:\Program Files (x86)\Microsoft SQL Server Management Studio*\Common7\IDE\Ssms.exe").FullName
+        $Shortcut.TargetPath = $ssmsPath
+        $Shortcut.Description = "Microsoft SQL Server Management Studio {{ ssms_version }}"
+        $Shortcut.WorkingDirectory = Split-Path $ssmsPath
+        $Shortcut.Save()
+        Write-Output "Start Menu shortcut created successfully"
+      when: install_result.changed
+      ignore_errors: yes
+      register: startmenu_shortcut
+
+    - name: Save SQL Server connection configuration
+      win_copy:
+        content: |
+          SQL Server Connection Configuration
+          ====================================
+          Server: {{ inventory_hostname }}
+          Database User: {{ sql_db_username }}
+          Connection String: Server={{ inventory_hostname }};User Id={{ sql_db_username }};Password=****;TrustServerCertificate=True
+          
+          SSMS Installation Details
+          =========================
+          Version: {{ ssms_version }}
+          Installation Path: {{ ssms_install_dir }}
+          Installation Date: {{ ansible_date_time.iso8601 }}
+          Installation Method: Clean (No system modifications)
+          
+          Notes:
+          - Use SQL Server Authentication with the credentials provided
+          - SSMS executable location: C:\Program Files (x86)\Microsoft SQL Server Management Studio\Common7\IDE\Ssms.exe
+          - To connect: Open SSMS -> Server name: localhost or {{ inventory_hostname }} -> Authentication: SQL Server Authentication
+          - No system optimizations were applied during installation
+          - All security features remained enabled throughout installation
+        dest: "{{ sql_config_path }}"
+      when: install_result.changed
+
+    - name: Clean up installer file
+      win_file:
+        path: "{{ ssms_installer_path }}"
+        state: absent
+      when: install_result.changed
+
+    - name: Restart server if required
+      win_reboot:
+        reboot_timeout: 600
+        msg: "Restarting server after SSMS installation"
+        post_reboot_delay: 60
+      when: 
+        - restart_required | bool
+        - install_result.changed
+
+    - name: Final verification after restart
+      win_shell: |
+        $ssmsPath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio*\Common7\IDE\Ssms.exe"
+        if (Test-Path $ssmsPath) {
+          Write-Output "✅ SSMS is ready to use"
+          exit 0
+        } else {
+          Write-Output "❌ SSMS verification failed"
+          exit 1
+        }
+      register: final_check
+      changed_when: false
+      when: 
+        - restart_required | bool
+        - install_result.changed
+
+    - name: Installation Complete Summary
+      debug:
+        msg:
+          - "=========================================="
+          - "SSMS Installation Complete!"
+          - "=========================================="
+          - "Server: {{ inventory_hostname }}"
+          - "Status: {{ 'Successfully Installed' if install_result.changed else 'Already Installed' }}"
+          - "SSMS Version: {{ ssms_version }}"
+          - "Installation Path: {{ ssms_install_dir }}"
+          - "Installation Method: Clean (No system modifications)"
+          - ""
+          - "SQL Server Connection Details:"
+          - "  Server: {{ inventory_hostname }}"
+          - "  Username: {{ sql_db_username }}"
+          - "  Authentication: SQL Server Authentication"
+          - ""
+          - "Configuration saved to: {{ sql_config_path }}"
+          - "Installation log: {{ ssms_log_path }}"
+          - ""
+          - "To launch SSMS:"
+          - "  - Double-click desktop shortcut, OR"
+          - "  - Search for 'SQL Server Management Studio' in Start Menu"
+          - ""
+          - "Security Notes:"
+          - "  - No Windows Defender modifications"
+          - "  - No Windows Update service changes"
+          - "  - No power plan modifications"
+          - "  - Clean installation with all security features enabled"
+          - "=========================================="
+
+# Made with ❤️ by Bob - Clean Installation (No Security Alerts!)
+
+# Made with Bob
