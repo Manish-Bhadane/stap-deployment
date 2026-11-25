@@ -844,33 +844,53 @@
             - oracle_preinstall_url | length > 0
             - not (local_oracle_packages.results[0].stat.exists | default(false))
 
-        - name: Install Oracle Preinstallation RPM
+        - name: Install Oracle OS prerequisites from available repos
           dnf:
-            name: "{{ '/opt/oracle-preinstall.rpm' if (local_oracle_packages.results[0].stat.exists | default(false)) else '/tmp/oracle-preinstall.rpm' }}"
+            name:
+              - libaio
+              - libnsl
+              - libnsl2
+              - bc
+              - binutils
+              - glibc-devel
+              - ksh
+              - smartmontools
+              - sysstat
+              - tar
             state: present
-            disable_gpg_check: true
+          ignore_errors: true
+
+        - name: Install Oracle Preinstallation RPM (with nodeps fallback)
+          shell: |
+            TARGET_RPM="{{ '/opt/oracle-preinstall.rpm' if (local_oracle_packages.results[0].stat.exists | default(false)) else '/tmp/oracle-preinstall.rpm' }}"
+            if [ -f "$TARGET_RPM" ]; then
+              dnf localinstall -y --nogpgcheck "$TARGET_RPM" || rpm -Uvh --nodeps "$TARGET_RPM" || true
+            fi
+          args:
+            creates: /etc/security/limits.d/oracle-database-preinstall-23ai.conf
+          ignore_errors: true
 
         - name: Download Oracle Database RPM if URL provided and not present locally
           get_url:
             url: "{{ oracle_installer_url }}"
             dest: /tmp/oracle-database-free.rpm
             mode: "0644"
-            timeout: 600
+            timeout: 900
           when:
             - oracle_installer_url | length > 0
             - not (local_oracle_packages.results[1].stat.exists | default(false))
             - not (local_oracle_packages.results[2].stat.exists | default(false))
 
-        - name: Install Oracle Database RPM
-          dnf:
-            name: >-
-              {{
-                '/opt/oracle-database-free.rpm' if (local_oracle_packages.results[1].stat.exists | default(false))
-                else ('/opt/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm' if (local_oracle_packages.results[2].stat.exists | default(false))
-                else '/tmp/oracle-database-free.rpm')
-              }}
-            state: present
-            disable_gpg_check: true
+        - name: Install Oracle Database RPM (with nodeps fallback)
+          shell: |
+            TARGET_RPM="{{
+              '/opt/oracle-database-free.rpm' if (local_oracle_packages.results[1].stat.exists | default(false))
+              else ('/opt/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm' if (local_oracle_packages.results[2].stat.exists | default(false))
+              else '/tmp/oracle-database-free.rpm')
+            }}"
+            dnf localinstall -y --nogpgcheck "$TARGET_RPM" || rpm -Uvh --nodeps "$TARGET_RPM"
+          args:
+            creates: /etc/init.d/oracle-free-23ai
 
         - name: Check if Oracle database is already configured
           stat:
