@@ -104,7 +104,7 @@
 
     # Optional custom package URLs (can be overridden via AWX survey or CLI vars)
     oracle_installer_url: "{{ oracle_package_url | default('https://download.oracle.com/otn-pub/otn_software/db-free/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm') }}"
-    oracle_preinstall_url: "{{ oracle_preinstall_package_url | default('https://yum.oracle.com/repo/OracleLinux/OL8/developer/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el8.x86_64.rpm') }}"
+    oracle_preinstall_url: "{{ oracle_preinstall_package_url | default('https://yum.oracle.com/repo/OracleLinux/OL8/appstream/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el8.x86_64.rpm') }}"
     db2_installer_url: "{{ db2_package_url | default('') }}"
     informix_installer_url: "{{ informix_package_url | default('') }}"
 
