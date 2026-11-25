@@ -332,24 +332,11 @@
             state: present
             disable_gpg_check: true
 
-        - name: Ensure my.cnf has mysqld section
+        - name: Clean my.cnf from unsupported static validate_password parameters
           lineinfile:
             path: /etc/my.cnf
-            line: "[mysqld]"
-            state: present
-          failed_when: false
-
-        - name: Relax MySQL password validation policy on RedHat
-          lineinfile:
-            path: /etc/my.cnf
-            line: "{{ item }}"
-            insertafter: '^\[mysqld\]'
-          loop:
-            - "validate_password.policy=LOW"
-            - "validate_password.length=4"
-            - "validate_password.mixed_case_count=0"
-            - "validate_password.number_count=0"
-            - "validate_password.special_char_count=0"
+            regexp: '^validate_password\.'
+            state: absent
           failed_when: false
 
         - name: Start and enable MySQL on RedHat
@@ -679,15 +666,22 @@
           changed_when: false
           failed_when: false
 
-        - name: Set MySQL root password using temporary password
+        - name: Set MySQL root password using temporary password and relax policy
           shell: |
-            mysql --connect-expired-password -u root -p'{{ mysql_temp_password.stdout }}' -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';"
+            # 1. Reset root with policy-compliant bootstrap password
+            mysql --connect-expired-password -u root -p'{{ mysql_temp_password.stdout }}' -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'TempBootstrap@2026!';"
+            # 2. Relax password policy or uninstall component
+            mysql -u root -p'TempBootstrap@2026!' -e "UNINSTALL COMPONENT 'file://component_validate_password';" || true
+            mysql -u root -p'TempBootstrap@2026!' -e "SET GLOBAL validate_password.policy=0; SET GLOBAL validate_password.length=4; SET GLOBAL validate_password.mixed_case_count=0; SET GLOBAL validate_password.number_count=0; SET GLOBAL validate_password.special_char_count=0;" || true
+            # 3. Set desired admin password
+            mysql -u root -p'TempBootstrap@2026!' -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';"
           when: mysql_temp_password.stdout | length > 0
           changed_when: true
           failed_when: false
 
         - name: Set MySQL root password if not yet set or blank
           shell: |
+            mysql -u root -e "UNINSTALL COMPONENT 'file://component_validate_password';" || true
             mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';" || true
           when: mysql_temp_password.stdout | length == 0
           changed_when: false
