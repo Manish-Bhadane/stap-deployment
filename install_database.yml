@@ -65,12 +65,20 @@
       - mysql
       - mariadb
       - mongodb
+      - cassandra
+      - oracle
+      - db2
+      - informix
 
     db_port_map:
       postgresql: 5432
       mysql: 3306
       mariadb: 3306
       mongodb: 27017
+      cassandra: 9042
+      oracle: 1521
+      db2: 50000
+      informix: 9088
 
     db_port: "{{ db_port_map[db_type] }}"
 
@@ -79,12 +87,26 @@
       mysql: "/var/lib/mysql"
       mariadb: "/var/lib/mysql"
       mongodb: "/var/lib/mongo"
+      cassandra: "/var/lib/cassandra/data"
+      oracle: "/opt/oracle/oradata"
+      db2: "/home/db2inst1/db2inst1"
+      informix: "/opt/ibm/informix/data"
 
     windows_data_dir_map:
       postgresql: "C:\\Program Files\\PostgreSQL\\data"
       mysql: "C:\\ProgramData\\MySQL\\MySQL Server\\Data"
       mariadb: "C:\\Program Files\\MariaDB\\data"
       mongodb: "C:\\data\\db"
+      cassandra: "C:\\ProgramData\\Cassandra\\data"
+      oracle: "C:\\app\\oracle\\oradata"
+      db2: "C:\\DB2\\data"
+      informix: "C:\\informix\\data"
+
+    # Optional custom package URLs (can be overridden via AWX survey or CLI vars)
+    oracle_installer_url: "{{ oracle_package_url | default('https://download.oracle.com/otn-pub/otn_software/db-free/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm') }}"
+    oracle_preinstall_url: "{{ oracle_preinstall_package_url | default('https://yum.oracle.com/repo/OracleLinux/OL8/developer/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el8.x86_64.rpm') }}"
+    db2_installer_url: "{{ db2_package_url | default('') }}"
+    informix_installer_url: "{{ informix_package_url | default('') }}"
 
     data_dir: >-
       {{
@@ -735,6 +757,211 @@
         - platform == 'linux'
         - db_type == 'mongodb'
 
+    - name: Linux | Cassandra on RedHat family
+      block:
+        - name: Install Java OpenJDK 11 for Cassandra
+          dnf:
+            name: java-11-openjdk-devel
+            state: present
+
+        - name: Add Apache Cassandra Yum repository
+          yum_repository:
+            name: cassandra
+            description: Apache Cassandra 4.1.x Repository
+            baseurl: https://redhat.cassandra.apache.org/41x/
+            gpgcheck: false
+            enabled: true
+
+        - name: Install Cassandra package
+          dnf:
+            name: cassandra
+            state: present
+
+        - name: Configure Cassandra bind address
+          lineinfile:
+            path: /etc/cassandra/conf/cassandra.yaml
+            regexp: '^rpc_address:'
+            line: "rpc_address: 0.0.0.0"
+
+        - name: Start and enable Cassandra service
+          systemd:
+            name: cassandra
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'cassandra'
+        - ansible_os_family == 'RedHat'
+
+    - name: Linux | Cassandra on Debian family
+      block:
+        - name: Install Java OpenJDK for Cassandra on Debian
+          apt:
+            name: openjdk-11-jre-headless
+            state: present
+            update_cache: true
+
+        - name: Add Apache Cassandra Apt repository
+          apt_repository:
+            repo: "deb https://debian.cassandra.apache.org 41x main"
+            state: present
+            filename: cassandra
+
+        - name: Install Cassandra on Debian
+          apt:
+            name: cassandra
+            state: present
+            update_cache: true
+
+        - name: Start and enable Cassandra on Debian
+          service:
+            name: cassandra
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'cassandra'
+        - ansible_os_family == 'Debian'
+
+    - name: Linux | Oracle Database on RedHat family
+      block:
+        - name: Install Oracle Preinstallation RPM
+          dnf:
+            name: "{{ oracle_preinstall_url }}"
+            state: present
+            disable_gpg_check: true
+
+        - name: Install Oracle Database RPM
+          dnf:
+            name: "{{ oracle_installer_url }}"
+            state: present
+            disable_gpg_check: true
+
+        - name: Check if Oracle database is already configured
+          stat:
+            path: /opt/oracle/oradata/FREE
+          register: oracle_db_dir
+
+        - name: Silently configure Oracle Database
+          shell: |
+            (echo "{{ db_admin_password }}"; echo "{{ db_admin_password }}";) | /etc/init.d/oracle-free-23ai configure
+          when: not oracle_db_dir.stat.exists
+          changed_when: true
+
+        - name: Start and enable Oracle Database service
+          systemd:
+            name: oracle-free-23ai
+            state: started
+            enabled: true
+      when:
+        - platform == 'linux'
+        - db_type == 'oracle'
+        - ansible_os_family == 'RedHat'
+
+    - name: Linux | IBM Db2 on RedHat family
+      block:
+        - name: Install Db2 OS prerequisites
+          dnf:
+            name:
+              - libaio
+              - numactl
+              - libstdc++
+              - pam
+              - ksh
+            state: present
+
+        - name: Ensure Db2 groups and users exist
+          user:
+            name: "{{ item }}"
+            state: present
+          loop:
+            - db2inst1
+            - db2fenc1
+
+        - name: Download Db2 installer archive if URL provided
+          get_url:
+            url: "{{ db2_installer_url }}"
+            dest: /tmp/db2_installer.tar.gz
+            mode: "0644"
+          when: db2_installer_url | length > 0
+
+        - name: Unarchive Db2 installer
+          unarchive:
+            src: "{{ '/tmp/db2_installer.tar.gz' if (db2_installer_url | length > 0) else '/opt/db2_installer.tar.gz' }}"
+            dest: /tmp
+            remote_src: true
+
+        - name: Execute Db2 silent install
+          command: /tmp/server_dec/db2_install -y -b /opt/ibm/db2/V11.5 -p SERVER
+          args:
+            creates: /opt/ibm/db2/V11.5/bin/db2
+
+        - name: Create Db2 Instance
+          command: /opt/ibm/db2/V11.5/instance/db2icrt -u db2fenc1 db2inst1
+          args:
+            creates: /home/db2inst1/sqllib/db2profile
+
+        - name: Start Db2 and create database
+          shell: |
+            su - db2inst1 -c "
+            db2start || true
+            db2 update dbm cfg using svcename 50000 || true
+            db2set DB2COMM=tcpip || true
+            db2 create db {{ db_name }} || true
+            "
+          changed_when: true
+      when:
+        - platform == 'linux'
+        - db_type == 'db2'
+        - ansible_os_family == 'RedHat'
+
+    - name: Linux | IBM Informix on RedHat family
+      block:
+        - name: Install Informix OS prerequisites
+          dnf:
+            name:
+              - libaio
+              - pam
+              - ncurses
+            state: present
+
+        - name: Ensure Informix user exists
+          user:
+            name: informix
+            state: present
+
+        - name: Download Informix installer archive if URL provided
+          get_url:
+            url: "{{ informix_installer_url }}"
+            dest: /tmp/informix_installer.tar
+            mode: "0644"
+          when: informix_installer_url | length > 0
+
+        - name: Unpack Informix installer
+          unarchive:
+            src: "{{ '/tmp/informix_installer.tar' if (informix_installer_url | length > 0) else '/opt/informix_installer.tar' }}"
+            dest: /tmp
+            remote_src: true
+
+        - name: Run Informix silent installer
+          command: /tmp/ids_install -i silent -DLICENSE_ACCEPTED=TRUE -DUSER_INSTALL_DIR=/opt/ibm/informix
+          args:
+            creates: /opt/ibm/informix/bin/oninit
+
+        - name: Initialize Informix Server Engine
+          shell: |
+            export INFORMIXDIR=/opt/ibm/informix
+            export PATH=$INFORMIXDIR/bin:$PATH
+            export ONCONFIG=onconfig.std
+            export INFORMIXSERVER=ol_informix1410
+            oninit -ivy || true
+          become_user: informix
+          changed_when: true
+      when:
+        - platform == 'linux'
+        - db_type == 'informix'
+        - ansible_os_family == 'RedHat'
+
     - name: Windows | PostgreSQL not yet implemented
       fail:
         msg: "Windows automated installation for PostgreSQL is not yet implemented."
@@ -762,6 +989,34 @@
       when:
         - platform == 'windows'
         - db_type == 'mongodb'
+
+    - name: Windows | Cassandra not yet implemented
+      fail:
+        msg: "Windows automated installation for Cassandra is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'cassandra'
+
+    - name: Windows | Oracle not yet implemented
+      fail:
+        msg: "Windows automated installation for Oracle is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'oracle'
+
+    - name: Windows | Db2 not yet implemented
+      fail:
+        msg: "Windows automated installation for Db2 is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'db2'
+
+    - name: Windows | Informix not yet implemented
+      fail:
+        msg: "Windows automated installation for Informix is not yet implemented."
+      when:
+        - platform == 'windows'
+        - db_type == 'informix'
 
   post_tasks:
     - name: Display success message
