@@ -332,6 +332,26 @@
             state: present
             disable_gpg_check: true
 
+        - name: Ensure my.cnf has mysqld section
+          lineinfile:
+            path: /etc/my.cnf
+            line: "[mysqld]"
+            state: present
+          failed_when: false
+
+        - name: Relax MySQL password validation policy on RedHat
+          lineinfile:
+            path: /etc/my.cnf
+            line: "{{ item }}"
+            insertafter: '^\[mysqld\]'
+          loop:
+            - "validate_password.policy=LOW"
+            - "validate_password.length=4"
+            - "validate_password.mixed_case_count=0"
+            - "validate_password.number_count=0"
+            - "validate_password.special_char_count=0"
+          failed_when: false
+
         - name: Start and enable MySQL on RedHat
           systemd:
             name: mysqld
@@ -666,7 +686,7 @@
           changed_when: true
           failed_when: false
 
-        - name: Set MySQL root password if already initialized
+        - name: Set MySQL root password if not yet set or blank
           shell: |
             mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ db_admin_password }}';" || true
           when: mysql_temp_password.stdout | length == 0
