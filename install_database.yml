@@ -864,6 +864,32 @@
           delay: 10
           until: cassandra_status.rc == 0
           changed_when: false
+
+        - name: Check whether the RHEL system Python exists for cqlsh
+          stat:
+            path: /usr/libexec/platform-python
+          register: platform_python
+
+        # cqlsh picks python3 from PATH, and a newer default python3 (3.12 on some images) breaks it with
+        # "No module named 'six.moves'". The RHEL system Python works, and cqlsh reads CQLSH_PYTHON.
+        - name: Make cqlsh use the RHEL system Python for every login shell
+          copy:
+            dest: /etc/profile.d/cassandra-cqlsh.sh
+            mode: "0644"
+            content: |
+              export CQLSH_PYTHON=/usr/libexec/platform-python
+          when: platform_python.stat.exists
+
+        - name: Check that cqlsh can connect (describe cluster)
+          shell: cqlsh -e "describe cluster"
+          environment:
+            CQLSH_PYTHON: /usr/libexec/platform-python
+          register: cqlsh_check
+          retries: 6
+          delay: 10
+          until: cqlsh_check.rc == 0
+          changed_when: false
+          when: platform_python.stat.exists
       when:
         - platform == 'linux'
         - db_type == 'cassandra'
