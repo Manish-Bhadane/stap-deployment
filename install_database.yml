@@ -888,20 +888,34 @@
               else ('/opt/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm' if (local_oracle_packages.results[2].stat.exists | default(false))
               else '/tmp/oracle-database-free.rpm')
             }}"
-            dnf localinstall -y --nogpgcheck "$TARGET_RPM" || rpm -Uvh --nodeps "$TARGET_RPM"
+            timeout 1800 dnf localinstall -y --nogpgcheck "$TARGET_RPM" || timeout 1800 rpm -Uvh --nodeps "$TARGET_RPM"
           args:
             creates: /etc/init.d/oracle-free-23ai
+          async: 2400
+          poll: 15
 
         - name: Check if Oracle database is already configured
           stat:
             path: /opt/oracle/oradata/FREE
           register: oracle_db_dir
 
+        - name: Install pexpect on target (required by the expect module)
+          dnf:
+            name: python3-pexpect
+            state: present
+          when: not oracle_db_dir.stat.exists
+
         - name: Silently configure Oracle Database
-          shell: |
-            (echo "{{ db_admin_password }}"; echo "{{ db_admin_password }}";) | /etc/init.d/oracle-free-23ai configure
+          expect:
+            command: /etc/init.d/oracle-free-23ai configure
+            responses:
+              '(?i)password.*:':
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+            timeout: 1800
           when: not oracle_db_dir.stat.exists
           changed_when: true
+          no_log: true
 
         - name: Start and enable Oracle Database service
           systemd:
