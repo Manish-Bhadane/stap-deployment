@@ -1347,7 +1347,7 @@
           shell: |
             cd /tmp
             runuser -u oracle -- env HOME=/home/oracle CV_ASSUME_DISTID=OL8 ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
-              {{ oracle_home }}/runInstaller -silent -ignorePrereqs -waitforcompletion \
+              {{ oracle_home }}/runInstaller -silent -ignorePrereqFailure -waitforcompletion \
               -responseFile /tmp/db_install_19c.rsp > /var/tmp/oracle19c_runinstaller.log 2>&1
             rc=$?
             if [ $rc -eq 0 ] || [ $rc -eq 6 ]; then
