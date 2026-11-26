@@ -1229,7 +1229,7 @@
             state: absent
 
         - name: Read the scp log when the copy failed
-          shell: "tail -n 20 /var/tmp/oracle19c_scp.log 2>&1; ls -lh {{ oracle_zip_path }} 2>&1; df -h /opt 2>&1"
+          shell: "grep -v '^\\*' /var/tmp/oracle19c_scp.log | grep -v '^$' | tail -n 8 2>&1; ls -lh {{ oracle_zip_path }} 2>&1; df -h /opt 2>&1"
           register: scp_log
           changed_when: false
           failed_when: false
