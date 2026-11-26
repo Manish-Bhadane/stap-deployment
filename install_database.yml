@@ -105,6 +105,22 @@
     # Optional custom package URLs (can be overridden via AWX survey or CLI vars)
     oracle_installer_url: "{{ oracle_package_url | default('https://download.oracle.com/otn-pub/otn_software/db-free/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm') }}"
     oracle_preinstall_url: "{{ oracle_preinstall_package_url | default('https://yum.oracle.com/repo/OracleLinux/OL8/appstream/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el8.x86_64.rpm') }}"
+    # Oracle release selector: "free" (default, Oracle Database Free 23ai RPM) or "19c" (Enterprise 19.3 from ZIP)
+    oracle_release: "{{ oracle_db_version | default('free') | lower }}"
+
+    # Oracle 19c settings (used only when oracle_release == '19c')
+    oracle_sid: "{{ db_name | upper }}"
+    oracle_pdb_name: "{{ oracle_19c_pdb_name | default('ORCLPDB1') | upper }}"
+    oracle_edition: "{{ oracle_19c_edition | default('EE') }}"
+    oracle_base: /u01/app/oracle
+    oracle_home: /u01/app/oracle/product/19.0.0/dbhome_1
+    oracle_inventory: /u01/app/oraInventory
+    oracle_data_dir: /u01/oradata
+    oracle_zip_path: "{{ oracle_19c_zip_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
+    file_server_host: "{{ source_host | default('9.46.241.103') }}"
+    file_server_user: "{{ source_user | default('root') }}"
+    file_server_path: "{{ source_installer_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
+    oracle_zip_sha256: "{{ oracle_19c_zip_sha256 | default('ba8329c757133da313ed3b6d7f86c5ac42cd9970a28bf2e6233f3235233aa8d8') }}"
     db2_installer_url: "{{ db2_package_url | default('') }}"
     informix_installer_url: "{{ informix_package_url | default('') }}"
 
@@ -823,7 +839,7 @@
         - db_type == 'cassandra'
         - ansible_os_family == 'Debian'
 
-    - name: Linux | Oracle Database on RedHat family
+    - name: Linux | Oracle Database Free 23ai on RedHat family
       block:
         - name: Check for pre-existing local Oracle RPM packages in /opt
           stat:
@@ -972,6 +988,440 @@
       when:
         - platform == 'linux'
         - db_type == 'oracle'
+        - oracle_release != '19c'
+        - ansible_os_family == 'RedHat'
+
+    # Selected with the survey/extra var oracle_db_version=19c. The 3 GB installer ZIP is not in git: the
+    # target pulls it from the file server with sshpass scp (same as install_stap_*.yml), using the AWX
+    # credential that injects source_ssh_password. Optional vars: source_host, source_user,
+    # source_installer_path, oracle_19c_zip_path, oracle_19c_zip_sha256, oracle_19c_pdb_name, oracle_19c_edition.
+    - name: Linux | Oracle Database 19c on RedHat family (separate from Free 23ai)
+      block:
+        - name: Validate database inputs (Oracle rejects other characters in the password)
+          assert:
+            that:
+              - db_name is match('^[A-Za-z][A-Za-z0-9]{0,7}$')
+              - db_admin_password is match('^[A-Za-z0-9_]{8,30}$')
+              - db_admin_password is match('.*[A-Z].*')
+              - db_admin_password is match('.*[a-z].*')
+              - db_admin_password is match('.*[0-9].*')
+            fail_msg: >-
+              db_name must be 1-8 letters/digits starting with a letter (it becomes the SID).
+              db_admin_password must be 8-30 characters using only letters, digits and underscore,
+              with at least one uppercase letter, one lowercase letter and one digit.
+
+        - name: Require a RedHat-family x86_64 target
+          assert:
+            that:
+              - ansible_os_family == 'RedHat'
+              - ansible_architecture == 'x86_64'
+            fail_msg: "Oracle 19c automation supports RedHat-family x86_64 Linux only."
+
+        - name: Display installation parameters
+          debug:
+            msg: |
+              Oracle 19c installation parameters
+              ==================================
+              Target: {{ ansible_host }} ({{ ansible_distribution }} {{ ansible_distribution_version }})
+              SID / global name: {{ oracle_sid }}
+              PDB: {{ oracle_pdb_name }}
+              Edition: {{ oracle_edition }}
+              ORACLE_HOME: {{ oracle_home }}
+              Data directory: {{ oracle_data_dir }}
+              Installer ZIP: {{ oracle_zip_path }}
+
+        - name: Check whether the software install already completed
+          stat:
+            path: "{{ oracle_home }}/.runinstaller_done"
+          register: sw_done
+
+        - name: Check whether something already listens on port 1521
+          shell: "ss -ltn | grep -q ':1521 '"
+          register: port_1521
+          changed_when: false
+          failed_when: false
+
+        - name: Fail early when port 1521 is taken by another database (for example Oracle Free 23ai)
+          fail:
+            msg: >-
+              Port 1521 is already in use on this host. Oracle 19c needs a machine without another
+              Oracle listener (such as Oracle Database Free 23ai). Use a clean target.
+          when:
+            - not sw_done.stat.exists
+            - port_1521.rc == 0
+
+        - name: Check that the host name resolves (Oracle installers need it)
+          shell: "getent hosts $(hostname -f) || getent hosts $(hostname)"
+          register: hostname_check
+          changed_when: false
+          failed_when: false
+
+        - name: Add the host name to /etc/hosts when it does not resolve
+          lineinfile:
+            path: /etc/hosts
+            line: "{{ ansible_default_ipv4.address }} {{ ansible_fqdn }} {{ ansible_hostname }}"
+            regexp: "^{{ ansible_default_ipv4.address | regex_escape }}\\s"
+          when: hostname_check.rc != 0
+
+        - name: Install OS prerequisites (packages missing from the repos are skipped)
+          shell: >-
+            dnf install -y --setopt=strict=0 bc binutils elfutils-libelf elfutils-libelf-devel
+            fontconfig-devel glibc glibc-devel ksh libaio libaio-devel libX11 libXau libXi
+            libXrender libXtst libgcc libnsl libnsl2 libstdc++ libstdc++-devel libxcb
+            libxcrypt-compat make policycoreutils smartmontools sysstat unzip
+          register: os_packages
+          changed_when: "'Installed:' in os_packages.stdout"
+
+        - name: Create Oracle groups
+          group:
+            name: "{{ item }}"
+            state: present
+          loop:
+            - oinstall
+            - dba
+
+        - name: Create the oracle user
+          user:
+            name: oracle
+            group: oinstall
+            groups: dba
+            shell: /bin/bash
+            create_home: true
+            state: present
+
+        - name: Set kernel parameters for Oracle
+          copy:
+            dest: /etc/sysctl.d/97-oracle-database-sysctl.conf
+            mode: "0644"
+            content: |
+              fs.aio-max-nr = 1048576
+              fs.file-max = 6815744
+              kernel.shmall = 1073741824
+              kernel.shmmax = 4398046511104
+              kernel.shmmni = 4096
+              kernel.sem = 250 32000 100 128
+              net.ipv4.ip_local_port_range = 9000 65500
+              net.core.rmem_default = 262144
+              net.core.rmem_max = 4194304
+              net.core.wmem_default = 262144
+              net.core.wmem_max = 1048576
+          register: sysctl_file
+
+        - name: Apply kernel parameters
+          command: sysctl -p /etc/sysctl.d/97-oracle-database-sysctl.conf
+          when: sysctl_file.changed
+
+        - name: Set shell limits for the oracle user
+          copy:
+            dest: /etc/security/limits.d/oracle-19c.conf
+            mode: "0644"
+            content: |
+              oracle soft nofile 1024
+              oracle hard nofile 65536
+              oracle soft nproc 16384
+              oracle hard nproc 16384
+              oracle soft stack 10240
+              oracle hard stack 32768
+
+        - name: Create Oracle directories
+          file:
+            path: "{{ item }}"
+            state: directory
+            owner: oracle
+            group: oinstall
+            mode: "0775"
+          loop:
+            - "{{ oracle_base }}"
+            - "{{ oracle_home }}"
+            - "{{ oracle_inventory }}"
+            - "{{ oracle_data_dir }}"
+
+        - name: Check free disk space under /u01 (ZIP, software and database need about 20 GB)
+          shell: "df -BG --output=avail /u01/app | tail -1 | tr -dc '0-9'"
+          register: free_gb
+          changed_when: false
+
+        - name: Fail when there is not enough disk space
+          fail:
+            msg: "Only {{ free_gb.stdout }} GB free on the filesystem holding /u01. Oracle 19c needs about 20 GB."
+          when:
+            - not sw_done.stat.exists
+            - free_gb.stdout | int < 20
+
+        - name: Check whether the installer ZIP is already on the target
+          stat:
+            path: "{{ oracle_zip_path }}"
+            get_checksum: false
+          register: zip_stat
+          when: not sw_done.stat.exists
+
+        - name: Require the file server credential when the installer ZIP must be fetched
+          assert:
+            that:
+              - source_ssh_password is defined
+              - source_ssh_password | length > 0
+            fail_msg: "Injected credential variable missing: source_ssh_password (file server password for {{ file_server_user }}@{{ file_server_host }})"
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+
+        - name: Install sshpass on the target when it is missing (needed for the scp step)
+          shell: "command -v sshpass >/dev/null 2>&1 || dnf install -y sshpass"
+          register: sshpass_install
+          changed_when: "'Installed' in sshpass_install.stdout"
+          failed_when: false
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+
+        - name: Check that sshpass is available on the target
+          shell: "command -v sshpass"
+          register: sshpass_check
+          changed_when: false
+          failed_when: false
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+
+        - name: Fail when sshpass is not available on the target
+          fail:
+            msg: >-
+              sshpass is not installed on the target and could not be installed from its repositories
+              (it is usually in EPEL). Install sshpass on the target, or copy the ZIP to
+              {{ oracle_zip_path }} on the target first.
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+            - sshpass_check.rc != 0
+
+        - name: Copy the 19c installer ZIP from the file server to the target via scp
+          shell: >-
+            sshpass -e scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+            {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}
+            {{ oracle_zip_path }}
+          environment:
+            SSHPASS: "{{ source_ssh_password }}"
+          args:
+            creates: "{{ oracle_zip_path }}"
+          async: 3600
+          poll: 15
+          no_log: true
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+
+        - name: Re-check the installer ZIP with its checksum
+          stat:
+            path: "{{ oracle_zip_path }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: zip_final
+          when: not sw_done.stat.exists
+
+        - name: Fail with instructions when the installer ZIP is missing or damaged
+          fail:
+            msg: >-
+              Installer ZIP not found or checksum mismatch at {{ oracle_zip_path }} on the target.
+              It is fetched from {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}.
+              Check that the file exists there and is complete. Expected sha256 {{ oracle_zip_sha256 }}.
+          when:
+            - not sw_done.stat.exists
+            - (not zip_final.stat.exists) or (zip_final.stat.checksum | default('') != oracle_zip_sha256)
+
+        - name: Make the ZIP readable by the oracle user
+          file:
+            path: "{{ oracle_zip_path }}"
+            mode: "0644"
+          when: not sw_done.stat.exists
+
+        - name: Unzip the 19c software into ORACLE_HOME
+          shell: >-
+            runuser -u oracle -- unzip -oq {{ oracle_zip_path }} -d {{ oracle_home }}
+            && touch {{ oracle_home }}/.unzip_done
+          args:
+            creates: "{{ oracle_home }}/.unzip_done"
+          async: 3600
+          poll: 15
+          when: not sw_done.stat.exists
+
+        - name: Work around the 19.3 link error on RHEL 8 and newer (ins_emagent.mk needs -lnnz19)
+          shell: |
+            F={{ oracle_home }}/sysman/lib/ins_emagent.mk
+            grep -q 'MK_EMAGENT_NMECTL) -lnnz19' "$F" || sed -i 's/\$(MK_EMAGENT_NMECTL)/\$(MK_EMAGENT_NMECTL) -lnnz19/g' "$F"
+          changed_when: false
+          when:
+            - not sw_done.stat.exists
+            - ansible_distribution_major_version | int >= 8
+
+        - name: Write the software install response file
+          copy:
+            dest: /tmp/db_install_19c.rsp
+            owner: oracle
+            group: oinstall
+            mode: "0600"
+            content: |
+              oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+              oracle.install.option=INSTALL_DB_SWONLY
+              UNIX_GROUP_NAME=oinstall
+              INVENTORY_LOCATION={{ oracle_inventory }}
+              ORACLE_HOME={{ oracle_home }}
+              ORACLE_BASE={{ oracle_base }}
+              oracle.install.db.InstallEdition={{ oracle_edition }}
+              oracle.install.db.OSDBA_GROUP=dba
+              oracle.install.db.OSOPER_GROUP=dba
+              oracle.install.db.OSBACKUPDBA_GROUP=dba
+              oracle.install.db.OSDGDBA_GROUP=dba
+              oracle.install.db.OSKMDBA_GROUP=dba
+              oracle.install.db.OSRACDBA_GROUP=dba
+              SECURITY_UPDATES_VIA_MYORACLESUPPORT=false
+              DECLINE_SECURITY_UPDATES=true
+          when: not sw_done.stat.exists
+
+        - name: Install Oracle 19c software (runInstaller exit code 6 means completed with warnings)
+          shell: |
+            runuser -u oracle -- env CV_ASSUME_DISTID=OL8 ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
+              {{ oracle_home }}/runInstaller -silent -ignorePrereqs -waitforcompletion \
+              -responseFile /tmp/db_install_19c.rsp
+            rc=$?
+            if [ $rc -eq 0 ] || [ $rc -eq 6 ]; then
+              touch {{ oracle_home }}/.runinstaller_installed
+              exit 0
+            fi
+            exit $rc
+          args:
+            creates: "{{ oracle_home }}/.runinstaller_installed"
+          async: 3600
+          poll: 15
+          when: not sw_done.stat.exists
+
+        - name: Run the root scripts
+          shell: |
+            yes '' | {{ oracle_inventory }}/orainstRoot.sh
+            yes '' | {{ oracle_home }}/root.sh
+            touch {{ oracle_home }}/.runinstaller_done
+          args:
+            creates: "{{ oracle_home }}/.runinstaller_done"
+          async: 900
+          poll: 10
+          when: not sw_done.stat.exists
+
+        - name: Remove the software install response file
+          file:
+            path: /tmp/db_install_19c.rsp
+            state: absent
+
+        - name: Create the listener on port 1521
+          shell: >-
+            runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }}
+            {{ oracle_home }}/bin/netca -silent -responseFile {{ oracle_home }}/assistants/netca/netca.rsp
+          args:
+            creates: "{{ oracle_home }}/network/admin/listener.ora"
+          async: 600
+          poll: 10
+
+        - name: Check whether the database already exists
+          shell: "grep -q '^{{ oracle_sid }}:' /etc/oratab"
+          register: db_exists
+          changed_when: false
+          failed_when: false
+
+        - name: Create the 19c container database with dbca
+          shell: |
+            timeout 3600 runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
+              {{ oracle_home }}/bin/dbca -silent -createDatabase \
+              -templateName General_Purpose.dbc \
+              -gdbName {{ oracle_sid }} -sid {{ oracle_sid }} \
+              -responseFile NO_VALUE -characterSet AL32UTF8 \
+              -sysPassword "$ORA_PW" -systemPassword "$ORA_PW" \
+              -createAsContainerDatabase true -numberOfPDBs 1 \
+              -pdbName {{ oracle_pdb_name }} -pdbAdminPassword "$ORA_PW" \
+              -databaseType MULTIPURPOSE -automaticMemoryManagement false \
+              -storageType FS -datafileDestination {{ oracle_data_dir }} \
+              -redoLogFileSize 50 -emConfiguration NONE -ignorePreReqs
+          environment:
+            ORA_PW: "{{ db_admin_password }}"
+          register: dbca_result
+          async: 3900
+          poll: 30
+          no_log: true
+          when: db_exists.rc != 0
+
+        - name: Mark the database to start automatically
+          lineinfile:
+            path: /etc/oratab
+            regexp: "^{{ oracle_sid }}:"
+            line: "{{ oracle_sid }}:{{ oracle_home }}:Y"
+
+        - name: Open all pluggable databases and save their state so they open after a restart
+          shell: |
+            runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} {{ oracle_home }}/bin/sqlplus -s / as sysdba <<'EOF'
+            alter pluggable database all open;
+            alter pluggable database all save state;
+            exit
+            EOF
+          changed_when: false
+
+        - name: Create a systemd unit that starts and stops the database with dbstart and dbshut
+          copy:
+            dest: /etc/systemd/system/oracle-19c.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Oracle Database 19c
+              After=network.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              User=oracle
+              Group=oinstall
+              Environment=ORACLE_HOME={{ oracle_home }}
+              Environment=ORACLE_SID={{ oracle_sid }}
+              ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
+              ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
+              TimeoutSec=900
+
+              [Install]
+              WantedBy=multi-user.target
+
+        - name: Enable the Oracle 19c service
+          systemd:
+            name: oracle-19c
+            enabled: true
+            daemon_reload: true
+
+        - name: Verify the database and the pluggable database are open read write
+          shell: |
+            runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} {{ oracle_home }}/bin/sqlplus -s / as sysdba <<'EOF'
+            set heading off feedback off pagesize 0
+            select name || ' ' || open_mode from v$database;
+            select name || ' ' || open_mode from v$pdbs;
+            exit
+            EOF
+          register: db_check
+          changed_when: false
+
+        - name: Fail when the databases are not open read write
+          fail:
+            msg: "Oracle 19c check failed. Output: {{ db_check.stdout }}"
+          when: >-
+            ((oracle_sid ~ ' READ WRITE') not in db_check.stdout)
+            or ((oracle_pdb_name ~ ' READ WRITE') not in db_check.stdout)
+
+        - name: Installation summary
+          debug:
+            msg: |
+              Oracle Database 19c installed on {{ ansible_host }}
+              Container database: {{ oracle_sid }}   Pluggable database: {{ oracle_pdb_name }}
+              Connect: {{ ansible_host }}:1521/{{ oracle_pdb_name }}
+              Users: sys (as sysdba), system, pdbadmin with the survey password
+              ORACLE_HOME: {{ oracle_home }}
+      when:
+        - platform == 'linux'
+        - db_type == 'oracle'
+        - oracle_release == '19c'
         - ansible_os_family == 'RedHat'
 
     - name: Linux | IBM Db2 on RedHat family
