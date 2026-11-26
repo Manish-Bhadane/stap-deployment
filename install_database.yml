@@ -1278,14 +1278,46 @@
           poll: 15
           when: not sw_done.stat.exists
 
+        - name: Check that the unzip produced a usable ORACLE_HOME
+          stat:
+            path: "{{ oracle_home }}/runInstaller"
+          register: runinstaller_stat
+          when: not sw_done.stat.exists
+
+        - name: Show the ORACLE_HOME contents when the unzip result looks wrong
+          shell: "ls -la {{ oracle_home }} | head -30; ls -ld {{ oracle_home }}; df -h /u01"
+          register: oracle_home_listing
+          changed_when: false
+          failed_when: false
+          when:
+            - not sw_done.stat.exists
+            - not runinstaller_stat.stat.exists
+
+        - name: Fail when the unzip did not produce runInstaller
+          fail:
+            msg: |-
+              {{ oracle_home }}/runInstaller was not found after unzipping {{ oracle_zip_path }}.
+              {{ oracle_home_listing.stdout | default('') }}
+          when:
+            - not sw_done.stat.exists
+            - not runinstaller_stat.stat.exists
+
+        - name: Check whether the 19.3 makefile needing the link workaround exists
+          stat:
+            path: "{{ oracle_home }}/sysman/lib/ins_emagent.mk"
+          register: emagent_mk
+          when: not sw_done.stat.exists
+
         - name: Work around the 19.3 link error on RHEL 8 and newer (ins_emagent.mk needs -lnnz19)
           shell: |
             F={{ oracle_home }}/sysman/lib/ins_emagent.mk
-            grep -q 'MK_EMAGENT_NMECTL) -lnnz19' "$F" || sed -i 's/\$(MK_EMAGENT_NMECTL)/\$(MK_EMAGENT_NMECTL) -lnnz19/g' "$F"
+            grep -q 'MK_EMAGENT_NMECTL) -lnnz19' "$F" && exit 0
+            sed -i 's/\$(MK_EMAGENT_NMECTL)/\$(MK_EMAGENT_NMECTL) -lnnz19/g' "$F"
           changed_when: false
           when:
             - not sw_done.stat.exists
             - ansible_distribution_major_version | int >= 8
+            - emagent_mk.stat.exists
 
         - name: Write the software install response file
           copy:
