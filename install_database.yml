@@ -821,11 +821,49 @@
             regexp: '^rpc_address:'
             line: "rpc_address: 0.0.0.0"
 
+        - name: Set broadcast_rpc_address (Cassandra refuses to start with rpc_address 0.0.0.0 without it)
+          lineinfile:
+            path: /etc/cassandra/conf/cassandra.yaml
+            regexp: '^#?\s*broadcast_rpc_address:'
+            line: "broadcast_rpc_address: {{ ansible_default_ipv4.address }}"
+          register: cassandra_bcast
+
         - name: Start and enable Cassandra service
           systemd:
             name: cassandra
-            state: started
+            state: "{{ 'restarted' if cassandra_bcast.changed else 'started' }}"
             enabled: true
+
+        - name: Wait for Cassandra to accept CQL connections on port 9042
+          wait_for:
+            host: 127.0.0.1
+            port: 9042
+            timeout: 240
+          register: cassandra_port
+          ignore_errors: true
+
+        - name: Read the Cassandra startup errors when port 9042 did not open
+          shell: "grep -E 'ERROR|Exception' /var/log/cassandra/system.log | tail -n 5 | cut -c1-400"
+          register: cassandra_log
+          changed_when: false
+          failed_when: false
+          when: cassandra_port.failed | default(false)
+
+        - name: Fail when Cassandra did not start
+          fail:
+            msg: |-
+              Cassandra is not listening on port 9042 after the service start.
+              Recent errors from /var/log/cassandra/system.log:
+              {{ cassandra_log.stdout | default('') }}
+          when: cassandra_port.failed | default(false)
+
+        - name: Check that the Cassandra node is Up/Normal
+          shell: "nodetool status | grep -q '^UN'"
+          register: cassandra_status
+          retries: 12
+          delay: 10
+          until: cassandra_status.rc == 0
+          changed_when: false
       when:
         - platform == 'linux'
         - db_type == 'cassandra'
