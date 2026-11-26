@@ -6,13 +6,18 @@
 # db_name (becomes the SID, max 8 letters/digits), db_admin_password.
 #
 # The 19c installer ZIP (LINUX.X64_193000_db_home.zip, ~3 GB) is NOT in git.
-# Provide it one of two ways:
-#   1. Copy it to the target first:  scp LINUX.X64_193000_db_home.zip root@<target>:/opt/
-#   2. Host it on an internal web server and pass extra var oracle_19c_zip_url.
+# It is pulled automatically from the file server with scp, the same way the
+# install_stap_*.yml playbooks fetch their installers: the target runs
+# "sshpass scp" against the file server. Nothing needs to be copied by hand.
+#
+# Credential: the AWX credential must inject the file server password as the
+# extra var source_ssh_password (same credential type the S-TAP job uses).
 #
 # Optional extra vars:
-#   oracle_19c_zip_path    (default /opt/LINUX.X64_193000_db_home.zip)
-#   oracle_19c_zip_url     (default empty: expect the file to exist already)
+#   source_host            (default 9.46.241.103, the file server)
+#   source_user            (default root)
+#   source_installer_path  (default /opt/LINUX.X64_193000_db_home.zip on the file server)
+#   oracle_19c_zip_path    (default /opt/LINUX.X64_193000_db_home.zip on the target)
 #   oracle_19c_zip_sha256  (default: sha256 of the 19.3 installer you downloaded)
 #   oracle_19c_pdb_name    (default ORCLPDB1)
 #   oracle_19c_edition     (default EE; use SE2 for Standard Edition 2)
@@ -60,7 +65,9 @@
     oracle_inventory: /u01/app/oraInventory
     oracle_data_dir: /u01/oradata
     oracle_zip_path: "{{ oracle_19c_zip_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
-    oracle_zip_url: "{{ oracle_19c_zip_url | default('') }}"
+    file_server_host: "{{ source_host | default('9.46.241.103') }}"
+    file_server_user: "{{ source_user | default('root') }}"
+    file_server_path: "{{ source_installer_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
     oracle_zip_sha256: "{{ oracle_19c_zip_sha256 | default('ba8329c757133da313ed3b6d7f86c5ac42cd9970a28bf2e6233f3235233aa8d8') }}"
 
   tasks:
@@ -222,17 +229,59 @@
       register: zip_stat
       when: not sw_done.stat.exists
 
-    - name: Download the installer ZIP when a URL is provided and the file is missing
-      get_url:
-        url: "{{ oracle_zip_url }}"
-        dest: "{{ oracle_zip_path }}"
-        mode: "0644"
-        timeout: 900
-      async: 3600
-      poll: 15
+    - name: Require the file server credential when the installer ZIP must be fetched
+      assert:
+        that:
+          - source_ssh_password is defined
+          - source_ssh_password | length > 0
+        fail_msg: "Injected credential variable missing: source_ssh_password (file server password for {{ file_server_user }}@{{ file_server_host }})"
       when:
         - not sw_done.stat.exists
-        - oracle_zip_url | length > 0
+        - not zip_stat.stat.exists
+
+    - name: Install sshpass on the target when it is missing (needed for the scp step)
+      shell: "command -v sshpass >/dev/null 2>&1 || dnf install -y sshpass"
+      register: sshpass_install
+      changed_when: "'Installed' in sshpass_install.stdout"
+      failed_when: false
+      when:
+        - not sw_done.stat.exists
+        - not zip_stat.stat.exists
+
+    - name: Check that sshpass is available on the target
+      shell: "command -v sshpass"
+      register: sshpass_check
+      changed_when: false
+      failed_when: false
+      when:
+        - not sw_done.stat.exists
+        - not zip_stat.stat.exists
+
+    - name: Fail when sshpass is not available on the target
+      fail:
+        msg: >-
+          sshpass is not installed on the target and could not be installed from its repositories
+          (it is usually in EPEL). Install sshpass on the target, or copy the ZIP to
+          {{ oracle_zip_path }} on the target first.
+      when:
+        - not sw_done.stat.exists
+        - not zip_stat.stat.exists
+        - sshpass_check.rc != 0
+
+    - name: Copy the 19c installer ZIP from the file server to the target via scp
+      shell: >-
+        sshpass -e scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}
+        {{ oracle_zip_path }}
+      environment:
+        SSHPASS: "{{ source_ssh_password }}"
+      args:
+        creates: "{{ oracle_zip_path }}"
+      async: 3600
+      poll: 15
+      no_log: true
+      when:
+        - not sw_done.stat.exists
         - not zip_stat.stat.exists
 
     - name: Re-check the installer ZIP with its checksum
@@ -247,8 +296,8 @@
       fail:
         msg: >-
           Installer ZIP not found or checksum mismatch at {{ oracle_zip_path }} on the target.
-          Copy LINUX.X64_193000_db_home.zip there first (scp it to the target) or set oracle_19c_zip_url.
-          Expected sha256 {{ oracle_zip_sha256 }}.
+          It is fetched from {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}.
+          Check that the file exists there and is complete. Expected sha256 {{ oracle_zip_sha256 }}.
       when:
         - not sw_done.stat.exists
         - (not zip_final.stat.exists) or (zip_final.stat.checksum | default('') != oracle_zip_sha256)
