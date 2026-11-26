@@ -915,7 +915,26 @@
             timeout: 1800
           when: not oracle_db_dir.stat.exists
           changed_when: true
+          register: oracle_configure
+          ignore_errors: true
           no_log: true
+
+        - name: Show Oracle configure result (password masked)
+          debug:
+            msg:
+              failed: "{{ oracle_configure.failed | default(false) }}"
+              rc: "{{ oracle_configure.rc | default('n/a') }}"
+              msg: "{{ oracle_configure.msg | default('') | replace(db_admin_password, '***') }}"
+              stdout: "{{ oracle_configure.stdout | default('') | replace(db_admin_password, '***') }}"
+              stderr: "{{ oracle_configure.stderr | default('') | replace(db_admin_password, '***') }}"
+          when: not oracle_db_dir.stat.exists
+
+        - name: Fail if Oracle configure failed
+          fail:
+            msg: "Oracle configure failed, see the previous task output."
+          when:
+            - not oracle_db_dir.stat.exists
+            - oracle_configure.failed | default(false)
 
         - name: Start and enable Oracle Database service
           systemd:
