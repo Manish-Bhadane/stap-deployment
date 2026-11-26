@@ -105,22 +105,37 @@
     # Optional custom package URLs (can be overridden via AWX survey or CLI vars)
     oracle_installer_url: "{{ oracle_package_url | default('https://download.oracle.com/otn-pub/otn_software/db-free/oracle-database-free-23ai-1.0-1.el8.x86_64.rpm') }}"
     oracle_preinstall_url: "{{ oracle_preinstall_package_url | default('https://yum.oracle.com/repo/OracleLinux/OL8/appstream/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el8.x86_64.rpm') }}"
-    # Oracle release selector: "free" (default, Oracle Database Free 23ai RPM) or "19c" (Enterprise 19.3 from ZIP)
+    # Oracle release selector: "free" (default, Oracle Database Free 23ai RPM), "19c" (Enterprise 19.3 from ZIP)
+    # or "21c" (Enterprise 21.3 from ZIP)
     oracle_release: "{{ oracle_db_version | default('free') | lower }}"
 
-    # Oracle 19c settings (used only when oracle_release == '19c')
+    # Per-release ZIP settings (used only when oracle_release is 19c or 21c).
+    # The 21c sha256 is empty on purpose: the checksum is skipped (and printed) until you set oracle_zip_sha256.
+    oracle_release_map:
+      '19c':
+        version: '19.0.0'
+        zip: /opt/LINUX.X64_193000_db_home.zip
+        sha256: ba8329c757133da313ed3b6d7f86c5ac42cd9970a28bf2e6233f3235233aa8d8
+      '21c':
+        version: '21.0.0'
+        zip: /opt/LINUX.X64_213000_db_home.zip
+        sha256: ''
+    oracle_rel: "{{ oracle_release_map[oracle_release] if oracle_release in oracle_release_map else oracle_release_map['19c'] }}"
+
+    # Oracle ZIP-based settings (19c and 21c). Overrides: oracle_zip_file, oracle_zip_sha256_value,
+    # oracle_pdb, oracle_edition_name (the old oracle_19c_* names still work).
     oracle_sid: "{{ db_name | upper }}"
-    oracle_pdb_name: "{{ oracle_19c_pdb_name | default('ORCLPDB1') | upper }}"
-    oracle_edition: "{{ oracle_19c_edition | default('EE') }}"
+    oracle_pdb_name: "{{ (oracle_pdb | default(oracle_19c_pdb_name | default('ORCLPDB1'))) | upper }}"
+    oracle_edition: "{{ oracle_edition_name | default(oracle_19c_edition | default('EE')) }}"
     oracle_base: /u01/app/oracle
-    oracle_home: /u01/app/oracle/product/19.0.0/dbhome_1
+    oracle_home: "/u01/app/oracle/product/{{ oracle_rel.version }}/dbhome_1"
     oracle_inventory: /u01/app/oraInventory
     oracle_data_dir: /u01/oradata
-    oracle_zip_path: "{{ oracle_19c_zip_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
+    oracle_zip_path: "{{ oracle_zip_file | default(oracle_19c_zip_path | default(oracle_rel.zip)) }}"
     file_server_host: "{{ source_host | default('9.46.241.103') }}"
     file_server_user: "{{ source_user | default('root') }}"
-    file_server_path: "{{ source_installer_path | default('/opt/LINUX.X64_193000_db_home.zip') }}"
-    oracle_zip_sha256: "{{ oracle_19c_zip_sha256 | default('ba8329c757133da313ed3b6d7f86c5ac42cd9970a28bf2e6233f3235233aa8d8') }}"
+    file_server_path: "{{ source_installer_path | default(oracle_rel.zip) }}"
+    oracle_zip_sha256: "{{ oracle_zip_sha256_value | default(oracle_19c_zip_sha256 | default(oracle_rel.sha256)) }}"
     db2_installer_url: "{{ db2_package_url | default('') }}"
     informix_installer_url: "{{ informix_package_url | default('') }}"
 
@@ -144,6 +159,13 @@
           - db_admin_password is defined
           - db_admin_password | length > 0
         fail_msg: "Required survey fields missing or invalid. Required: platform, db_type, db_name, db_admin_user, db_admin_password"
+
+    - name: Validate the Oracle release selector
+      assert:
+        that:
+          - oracle_release == 'free' or oracle_release in oracle_release_map
+        fail_msg: "oracle_db_version '{{ oracle_release }}' is not supported. Use free, 19c or 21c."
+      when: db_type == 'oracle'
 
     - name: Display installation parameters
       debug:
@@ -988,14 +1010,14 @@
       when:
         - platform == 'linux'
         - db_type == 'oracle'
-        - oracle_release != '19c'
+        - oracle_release not in oracle_release_map
         - ansible_os_family == 'RedHat'
 
-    # Selected with the survey/extra var oracle_db_version=19c. The 3 GB installer ZIP is not in git: the
+    # Selected with the survey/extra var oracle_db_version=19c or 21c. The 3 GB installer ZIP is not in git: the
     # target pulls it from the file server with sshpass scp (same as install_stap_*.yml), using the AWX
     # credential that injects source_ssh_password. Optional vars: source_host, source_user,
-    # source_installer_path, oracle_19c_zip_path, oracle_19c_zip_sha256, oracle_19c_pdb_name, oracle_19c_edition.
-    - name: Linux | Oracle Database 19c on RedHat family (separate from Free 23ai)
+    # source_installer_path, oracle_zip_file, oracle_zip_sha256_value, oracle_pdb, oracle_edition_name.
+    - name: Linux | Oracle Database 19c / 21c on RedHat family (separate from Free 23ai)
       block:
         - name: Validate database inputs (Oracle rejects other characters in the password)
           assert:
@@ -1015,13 +1037,13 @@
             that:
               - ansible_os_family == 'RedHat'
               - ansible_architecture == 'x86_64'
-            fail_msg: "Oracle 19c automation supports RedHat-family x86_64 Linux only."
+            fail_msg: "Oracle {{ oracle_release }} automation supports RedHat-family x86_64 Linux only."
 
         - name: Display installation parameters
           debug:
             msg: |
-              Oracle 19c installation parameters
-              ==================================
+              Oracle {{ oracle_release }} installation parameters
+              ===================================================
               Target: {{ ansible_host }} ({{ ansible_distribution }} {{ ansible_distribution_version }})
               SID / global name: {{ oracle_sid }}
               PDB: {{ oracle_pdb_name }}
@@ -1044,7 +1066,7 @@
         - name: Fail early when port 1521 is taken by another database (for example Oracle Free 23ai)
           fail:
             msg: >-
-              Port 1521 is already in use on this host. Oracle 19c needs a machine without another
+              Port 1521 is already in use on this host. Oracle {{ oracle_release }} needs a machine without another
               Oracle listener (such as Oracle Database Free 23ai). Use a clean target.
           when:
             - not sw_done.stat.exists
@@ -1113,7 +1135,7 @@
 
         - name: Set shell limits for the oracle user
           copy:
-            dest: /etc/security/limits.d/oracle-19c.conf
+            dest: /etc/security/limits.d/oracle-database.conf
             mode: "0644"
             content: |
               oracle soft nofile 1024
@@ -1143,7 +1165,7 @@
 
         - name: Fail when there is not enough disk space
           fail:
-            msg: "Only {{ free_gb.stdout }} GB free on the filesystem holding /u01. Oracle 19c needs about 20 GB."
+            msg: "Only {{ free_gb.stdout }} GB free on the filesystem holding /u01. Oracle {{ oracle_release }} needs about 20 GB."
           when:
             - not sw_done.stat.exists
             - free_gb.stdout | int < 20
@@ -1206,7 +1228,7 @@
             - not sw_done.stat.exists
             - not zip_stat.stat.exists
 
-        - name: Copy the 19c installer ZIP from the file server to the target via scp
+        - name: Copy the {{ oracle_release }} installer ZIP from the file server to the target via scp
           shell: >-
             sshpass -f /root/.oracle19c_scp_pw
             scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30
@@ -1257,10 +1279,17 @@
             msg: >-
               Installer ZIP not found or checksum mismatch at {{ oracle_zip_path }} on the target.
               It is fetched from {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}.
-              Check that the file exists there and is complete. Expected sha256 {{ oracle_zip_sha256 }}.
+              Check that the file exists there and is complete. Expected sha256 {{ oracle_zip_sha256 | default('(not set)', true) }}.
           when:
             - not sw_done.stat.exists
-            - (not zip_final.stat.exists) or (zip_final.stat.checksum | default('') != oracle_zip_sha256)
+            - (not zip_final.stat.exists) or (oracle_zip_sha256 | length > 0 and zip_final.stat.checksum | default('') != oracle_zip_sha256)
+
+        - name: Show the installer ZIP checksum when no expected checksum is configured
+          debug:
+            msg: "No expected sha256 is set for {{ oracle_release }}; checksum not verified. Actual sha256: {{ zip_final.stat.checksum | default('n/a') }}"
+          when:
+            - not sw_done.stat.exists
+            - oracle_zip_sha256 | length == 0
 
         - name: Make the ZIP readable by the oracle user
           file:
@@ -1268,7 +1297,7 @@
             mode: "0644"
           when: not sw_done.stat.exists
 
-        - name: Unzip the 19c software into ORACLE_HOME
+        - name: Unzip the {{ oracle_release }} software into ORACLE_HOME
           shell: >-
             runuser -u oracle -- unzip -oq {{ oracle_zip_path }} -d {{ oracle_home }}
             && touch {{ oracle_home }}/.unzip_done
@@ -1326,7 +1355,7 @@
             group: oinstall
             mode: "0600"
             content: |
-              oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+              oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v{{ oracle_rel.version }}
               oracle.install.option=INSTALL_DB_SWONLY
               UNIX_GROUP_NAME=oinstall
               INVENTORY_LOCATION={{ oracle_inventory }}
@@ -1343,7 +1372,7 @@
               DECLINE_SECURITY_UPDATES=true
           when: not sw_done.stat.exists
 
-        - name: Install Oracle 19c software (runInstaller exit code 6 means completed with warnings)
+        - name: Install Oracle {{ oracle_release }} software (runInstaller exit code 6 means completed with warnings)
           shell: |
             cd /tmp
             runuser -u oracle -- env HOME=/home/oracle CV_ASSUME_DISTID=OL8 ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
@@ -1379,7 +1408,7 @@
         - name: Fail with the runInstaller error
           fail:
             msg: |-
-              Oracle 19c runInstaller failed (rc={{ runinstaller_result.rc | default('n/a') }}).
+              Oracle {{ oracle_release }} runInstaller failed (rc={{ runinstaller_result.rc | default('n/a') }}).
               {{ runinstaller_log.stdout | default('') }}
           when: runinstaller_result.failed | default(false)
 
@@ -1414,7 +1443,7 @@
           changed_when: false
           failed_when: false
 
-        - name: Create the 19c container database with dbca
+        - name: Create the {{ oracle_release }} container database with dbca
           shell: |
             timeout 3600 runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
               {{ oracle_home }}/bin/dbca -silent -createDatabase \
@@ -1452,13 +1481,13 @@
 
         - name: Create a systemd unit that starts and stops the database with dbstart and dbshut
           copy:
-            dest: /etc/systemd/system/oracle-19c.service
+            dest: /etc/systemd/system/oracle-{{ oracle_release }}.service
             owner: root
             group: root
             mode: "0644"
             content: |
               [Unit]
-              Description=Oracle Database 19c
+              Description=Oracle Database {{ oracle_release }}
               After=network.target
 
               [Service]
@@ -1475,9 +1504,9 @@
               [Install]
               WantedBy=multi-user.target
 
-        - name: Enable the Oracle 19c service
+        - name: Enable the Oracle {{ oracle_release }} service
           systemd:
-            name: oracle-19c
+            name: oracle-{{ oracle_release }}
             enabled: true
             daemon_reload: true
 
@@ -1494,7 +1523,7 @@
 
         - name: Fail when the databases are not open read write
           fail:
-            msg: "Oracle 19c check failed. Output: {{ db_check.stdout }}"
+            msg: "Oracle {{ oracle_release }} check failed. Output: {{ db_check.stdout }}"
           when: >-
             ((oracle_sid ~ ' READ WRITE') not in db_check.stdout)
             or ((oracle_pdb_name ~ ' READ WRITE') not in db_check.stdout)
@@ -1502,7 +1531,7 @@
         - name: Installation summary
           debug:
             msg: |
-              Oracle Database 19c installed on {{ ansible_host }}
+              Oracle Database {{ oracle_release }} installed on {{ ansible_host }}
               Container database: {{ oracle_sid }}   Pluggable database: {{ oracle_pdb_name }}
               Connect: {{ ansible_host }}:1521/{{ oracle_pdb_name }}
               Users: sys (as sysdba), system, pdbadmin with the survey password
@@ -1510,7 +1539,7 @@
       when:
         - platform == 'linux'
         - db_type == 'oracle'
-        - oracle_release == '19c'
+        - oracle_release in oracle_release_map
         - ansible_os_family == 'RedHat'
 
     - name: Linux | IBM Db2 on RedHat family
