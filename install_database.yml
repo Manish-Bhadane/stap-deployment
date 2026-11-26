@@ -942,6 +942,27 @@
             - not oracle_db_dir.stat.exists
             - oracle_configure.failed | default(false)
 
+        - name: Create systemd unit for Oracle Database (RPM ships only an init script)
+          copy:
+            dest: /etc/systemd/system/oracle-free-23ai.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Oracle Database Free 23ai
+              After=network.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              ExecStart=/etc/init.d/oracle-free-23ai start
+              ExecStop=/etc/init.d/oracle-free-23ai stop
+              TimeoutSec=600
+
+              [Install]
+              WantedBy=multi-user.target
+
         - name: Start and enable Oracle Database service
           systemd:
             name: oracle-free-23ai
