@@ -1,0 +1,3 @@
+
+# Oracle installer ZIPs are too large for git; copy them to the target instead
+LINUX.X64_*.zip
