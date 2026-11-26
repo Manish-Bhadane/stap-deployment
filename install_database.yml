@@ -1367,8 +1367,10 @@
           shell: |
             echo "--- runInstaller output (last 30 lines) ---"
             tail -n 30 /var/tmp/oracle19c_runinstaller.log 2>&1
-            echo "--- installActions log (last 25 lines) ---"
-            ls -t {{ oracle_inventory }}/logs/installActions*.log /tmp/OraInstall*/installActions*.log 2>/dev/null | head -1 | xargs -r tail -n 25
+            echo "--- compiler/linker errors from make.log ---"
+            grep -hE "Error|error:|undefined reference|cannot find|ld:|\*\*\*" {{ oracle_home }}/install/make.log 2>/dev/null | tail -n 20
+            echo "--- installActions log (last 15 lines) ---"
+            ls -t {{ oracle_inventory }}/logs/installActions*.log /tmp/InstallActions*/installActions*.log /tmp/OraInstall*/installActions*.log 2>/dev/null | head -1 | xargs -r tail -n 15
           register: runinstaller_log
           changed_when: false
           failed_when: false
