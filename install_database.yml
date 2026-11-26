@@ -1194,21 +1194,55 @@
             - not zip_stat.stat.exists
             - sshpass_check.rc != 0
 
-        - name: Copy the 19c installer ZIP from the file server to the target via scp
-          shell: >-
-            sshpass -e scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-            {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}
-            {{ oracle_zip_path }}
-          environment:
-            SSHPASS: "{{ source_ssh_password }}"
-          args:
-            creates: "{{ oracle_zip_path }}"
-          async: 3600
-          poll: 15
+        - name: Write the file server password to a temporary 0600 file (keeps it off command lines and out of -vvv logs)
+          copy:
+            dest: /root/.oracle19c_scp_pw
+            content: "{{ source_ssh_password }}"
+            owner: root
+            group: root
+            mode: "0600"
           no_log: true
           when:
             - not sw_done.stat.exists
             - not zip_stat.stat.exists
+
+        - name: Copy the 19c installer ZIP from the file server to the target via scp
+          shell: >-
+            sshpass -f /root/.oracle19c_scp_pw
+            scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30
+            {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}
+            {{ oracle_zip_path }}
+            > /var/tmp/oracle19c_scp.log 2>&1
+          args:
+            creates: "{{ oracle_zip_path }}"
+          async: 3600
+          poll: 15
+          register: scp_result
+          ignore_errors: true
+          when:
+            - not sw_done.stat.exists
+            - not zip_stat.stat.exists
+
+        - name: Remove the temporary password file
+          file:
+            path: /root/.oracle19c_scp_pw
+            state: absent
+
+        - name: Read the scp log when the copy failed
+          shell: "tail -n 20 /var/tmp/oracle19c_scp.log 2>&1; ls -lh {{ oracle_zip_path }} 2>&1; df -h /opt 2>&1"
+          register: scp_log
+          changed_when: false
+          failed_when: false
+          when: scp_result.failed | default(false)
+
+        - name: Fail with the scp error
+          fail:
+            msg: |-
+              Copying the installer ZIP from {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }} failed.
+              Output from the target:
+              {{ scp_log.stdout | default('') }}
+              {{ scp_result.msg | default('') }}
+          when: scp_result.failed | default(false)
 
         - name: Re-check the installer ZIP with its checksum
           stat:
