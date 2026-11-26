@@ -1345,9 +1345,10 @@
 
         - name: Install Oracle 19c software (runInstaller exit code 6 means completed with warnings)
           shell: |
-            runuser -u oracle -- env CV_ASSUME_DISTID=OL8 ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
+            cd /tmp
+            runuser -u oracle -- env HOME=/home/oracle CV_ASSUME_DISTID=OL8 ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
               {{ oracle_home }}/runInstaller -silent -ignorePrereqs -waitforcompletion \
-              -responseFile /tmp/db_install_19c.rsp
+              -responseFile /tmp/db_install_19c.rsp > /var/tmp/oracle19c_runinstaller.log 2>&1
             rc=$?
             if [ $rc -eq 0 ] || [ $rc -eq 6 ]; then
               touch {{ oracle_home }}/.runinstaller_installed
@@ -1358,7 +1359,27 @@
             creates: "{{ oracle_home }}/.runinstaller_installed"
           async: 3600
           poll: 15
+          register: runinstaller_result
+          ignore_errors: true
           when: not sw_done.stat.exists
+
+        - name: Read the runInstaller output when the install failed
+          shell: |
+            echo "--- runInstaller output (last 30 lines) ---"
+            tail -n 30 /var/tmp/oracle19c_runinstaller.log 2>&1
+            echo "--- installActions log (last 25 lines) ---"
+            ls -t {{ oracle_inventory }}/logs/installActions*.log /tmp/OraInstall*/installActions*.log 2>/dev/null | head -1 | xargs -r tail -n 25
+          register: runinstaller_log
+          changed_when: false
+          failed_when: false
+          when: runinstaller_result.failed | default(false)
+
+        - name: Fail with the runInstaller error
+          fail:
+            msg: |-
+              Oracle 19c runInstaller failed (rc={{ runinstaller_result.rc | default('n/a') }}).
+              {{ runinstaller_log.stdout | default('') }}
+          when: runinstaller_result.failed | default(false)
 
         - name: Run the root scripts
           shell: |
