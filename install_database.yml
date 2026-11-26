@@ -1229,13 +1229,17 @@
             - not zip_stat.stat.exists
 
         - name: Copy the {{ oracle_release }} installer ZIP from the file server to the target via scp
-          shell: >-
-            sshpass -f /root/.oracle19c_scp_pw
-            scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30
-            {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }}
-            {{ oracle_zip_path }}
-            > /var/tmp/oracle19c_scp.log 2>&1
+          # scp -O (legacy protocol) exists only in OpenSSH 8.7 and newer (RHEL 9); OpenSSH 8.0 on RHEL 8
+          # rejects it as an unknown option and already uses the legacy protocol, so the flag is added only when accepted.
+          shell: |
+            SCP_O="-O"
+            scp -O 2>&1 | grep -qi "unknown option" && SCP_O=""
+            sshpass -f /root/.oracle19c_scp_pw \
+              scp $SCP_O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 \
+              {{ file_server_user }}@{{ file_server_host }}:{{ file_server_path }} \
+              {{ oracle_zip_path }} > /var/tmp/oracle19c_scp.log 2>&1
           args:
+            executable: /bin/bash
             creates: "{{ oracle_zip_path }}"
           async: 3600
           poll: 15
