@@ -912,6 +912,12 @@
               '(?i)password.*:':
                 - "{{ db_admin_password }}"
                 - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
+                - "{{ db_admin_password }}"
             timeout: 1800
           when: not oracle_db_dir.stat.exists
           changed_when: true
@@ -941,6 +947,7 @@
             name: oracle-free-23ai
             state: started
             enabled: true
+            daemon_reload: true
       when:
         - platform == 'linux'
         - db_type == 'oracle'
