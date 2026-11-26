@@ -1455,8 +1455,19 @@
           changed_when: false
           failed_when: false
 
+        - name: Write the database password to a temporary 0600 file (keeps it out of -vvv async logs)
+          copy:
+            dest: /root/.oracle_db_pw
+            content: "{{ db_admin_password }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when: db_exists.rc != 0
+
         - name: Create the {{ oracle_release }} container database with dbca
           shell: |
+            ORA_PW=$(cat /root/.oracle_db_pw); rm -f /root/.oracle_db_pw
             timeout 3600 runuser -u oracle -- env ORACLE_HOME={{ oracle_home }} ORACLE_BASE={{ oracle_base }} \
               {{ oracle_home }}/bin/dbca -silent -createDatabase \
               -templateName General_Purpose.dbc \
@@ -1468,8 +1479,6 @@
               -databaseType MULTIPURPOSE -automaticMemoryManagement false \
               -storageType FS -datafileDestination {{ oracle_data_dir }} \
               -redoLogFileSize 50 -emConfiguration NONE -ignorePreReqs
-          environment:
-            ORA_PW: "{{ db_admin_password }}"
           register: dbca_result
           async: 3900
           poll: 30
