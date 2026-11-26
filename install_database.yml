@@ -1725,6 +1725,9 @@
 
   post_tasks:
     - name: Display success message
+      vars:
+        oracle_zip_install: "{{ db_type == 'oracle' and oracle_release in oracle_release_map }}"
+        oracle_label: "{{ ('Oracle Database ' ~ oracle_release) if oracle_zip_install | bool else 'Oracle Database Free 23ai' }}"
       debug:
         msg: |
           Database installation completed.
@@ -1732,9 +1735,11 @@
           Details:
           - Platform: {{ platform }}
           - Type: {{ db_type }}
+          - Release: {{ oracle_label if db_type == 'oracle' else 'n/a' }}
           - Database Name: {{ db_name }}
-          - Admin User: {{ db_admin_user }}
+          - Admin User: {{ 'sys / system / pdbadmin (db_admin_user is ignored for Oracle)' if db_type == 'oracle' else db_admin_user }}
           - Port: {{ db_port }}
-          - Data Directory: {{ data_dir }}
+          - Data Directory: {{ oracle_data_dir if oracle_zip_install | bool else data_dir }}
+          - ORACLE_HOME: {{ oracle_home if oracle_zip_install | bool else 'n/a' }}
 
 # Made with Bob
