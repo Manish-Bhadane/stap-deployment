@@ -1348,6 +1348,14 @@
             - ansible_distribution_major_version | int >= 8
             - emagent_mk.stat.exists
 
+        - name: Work around the missing libpthread_nonshared.a on RHEL 9 and newer (glibc 2.34 merged libpthread into libc)
+          shell: ar rc /usr/lib64/libpthread_nonshared.a
+          args:
+            creates: /usr/lib64/libpthread_nonshared.a
+          when:
+            - not sw_done.stat.exists
+            - ansible_distribution_major_version | int >= 9
+
         - name: Write the software install response file
           copy:
             dest: /tmp/db_install_19c.rsp
