@@ -137,6 +137,22 @@
     file_server_path: "{{ source_installer_path | default(oracle_rel.zip) }}"
     oracle_zip_sha256: "{{ oracle_zip_sha256_value | default(oracle_19c_zip_sha256 | default(oracle_rel.sha256)) }}"
     db2_installer_url: "{{ db2_package_url | default('') }}"
+
+    # Db2 release selector (survey variable db2_db_version): "11.5" (default) or "12.1". The media are the universal
+    # fix pack images on the file server (they contain db2_install and db2setup). Overrides: db2_tar_file, db2_tar_sha256.
+    db2_release: "{{ db2_db_version | default('11.5') | string }}"
+    db2_release_map:
+      '11.5':
+        full: '11.5.9'
+        tar: /opt/db2/11.5/v11.5.9_linuxx64_universal_fixpack.tar.gz
+        sha256: fbf2db621b3ba6721efa0ea0343a7fcb06e57ad903dca134d6735f15117b2e8b
+        dir: /opt/ibm/db2/V11.5
+      '12.1':
+        full: '12.1.6'
+        tar: /opt/db2/12.1/v12.1.6_linuxx64_universal_fixpack.tar.gz
+        sha256: 926f7fa549fd32e4cbb4b2003375648dfb0b9ac214c20b12f95249c3f37c01b5
+        dir: /opt/ibm/db2/V12.1
+    db2_rel: "{{ db2_release_map[db2_release] if db2_release in db2_release_map else db2_release_map['11.5'] }}"
     informix_installer_url: "{{ informix_package_url | default('') }}"
 
     data_dir: >-
@@ -1627,62 +1643,414 @@
         - oracle_release in oracle_release_map
         - ansible_os_family == 'RedHat'
 
+    # IBM Db2 11.5 / 12.1 (x86_64). The media are the universal fix pack images on the file server
+    # (/opt/db2/<release>/v<version>_linuxx64_universal_fixpack.tar.gz); they contain db2_install and db2setup.
+    # The target pulls the archive with the same sshpass scp method and source_ssh_password credential as Oracle and
+    # Informix, unless db2_package_url is set. db_admin_user is ignored; db_admin_password becomes the OS password
+    # of the instance owner (db2inst1). 12.1 needs RHEL 9.4+ (11.5.9 supports RHEL 8.1+ and 9.2+).
     - name: Linux | IBM Db2 on RedHat family
+      vars:
+        db2_inst: db2inst1
+        db2_fenced: db2fenc1
+        db2_dir: "{{ db2_rel.dir }}"
+        db2_tar: "{{ db2_tar_file | default(db2_rel.tar) }}"
+        db2_tar_src: "{{ source_installer_path | default(db2_tar) }}"
+        db2_tar_sha: "{{ db2_tar_sha256 | default(db2_rel.sha256) }}"
+        db2_dbname: "{{ db_name | upper }}"
+        db2_tcp_port: 50000
+        db2_media_dir: /var/tmp/db2_media
       block:
+        - name: Validate the Db2 release selector and database name
+          assert:
+            that:
+              - db2_release in db2_release_map
+              - db_name is match('^[A-Za-z][A-Za-z0-9]{0,7}$')
+              - not (db_name | upper is match('^(SYS|DBM|IBM)'))
+              - (db2_release != '12.1') or (ansible_distribution_major_version | int >= 9)
+            fail_msg: >-
+              Db2 inputs are not valid: db2_db_version '{{ db2_release }}' must be 11.5 or 12.1 (12.1 needs RHEL 9.4 or newer);
+              the database name '{{ db_name }}' must be 1 to 8 letters or digits, start with a letter,
+              and not start with SYS, DBM or IBM.
+
+        - name: Check whether Db2 is already installed
+          stat:
+            path: "{{ db2_dir }}/bin/db2"
+          register: db2_installed
+
         - name: Install Db2 OS prerequisites
           dnf:
             name:
               - libaio
               - numactl
+              - numactl-libs
               - libstdc++
               - pam
               - ksh
+              - perl
+              - perl-Net-Ping
+              - libxcrypt-compat
+              - binutils
+              - tar
+              - file
+              - iproute
             state: present
+            skip_broken: true
+          when: not db2_installed.stat.exists
 
-        - name: Ensure Db2 groups and users exist
-          user:
+        - name: Check whether the Db2 media is already on the target
+          stat:
+            path: "{{ db2_tar }}"
+            get_checksum: false
+          register: db2_tar_stat
+          when: not db2_installed.stat.exists
+
+        - name: Create the Db2 media directory on the target
+          file:
+            path: "{{ db2_tar | dirname }}"
+            state: directory
+            mode: "0755"
+          when: not db2_installed.stat.exists
+
+        - name: Download the Db2 media from db2_package_url
+          get_url:
+            url: "{{ db2_installer_url }}"
+            dest: "{{ db2_tar }}"
+            mode: "0644"
+          when:
+            - not db2_installed.stat.exists
+            - not db2_tar_stat.stat.exists
+            - db2_installer_url | length > 0
+
+        - name: Require the file server credential when the Db2 media must be fetched
+          assert:
+            that:
+              - source_ssh_password is defined
+              - source_ssh_password | length > 0
+            fail_msg: "Injected credential variable missing: source_ssh_password (file server password for {{ file_server_user }}@{{ file_server_host }})"
+          when:
+            - not db2_installed.stat.exists
+            - not db2_tar_stat.stat.exists
+            - db2_installer_url | length == 0
+
+        - name: Install sshpass on the target when it is missing (needed for the scp step)
+          shell: "command -v sshpass >/dev/null 2>&1 || dnf install -y sshpass"
+          register: db2_sshpass
+          changed_when: "'Installed' in db2_sshpass.stdout"
+          failed_when: false
+          when:
+            - not db2_installed.stat.exists
+            - not db2_tar_stat.stat.exists
+            - db2_installer_url | length == 0
+
+        - name: Write the file server password to a temporary 0600 file (keeps it off command lines and out of -vvv logs)
+          copy:
+            dest: /root/.db2_scp_pw
+            content: "{{ source_ssh_password }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when:
+            - not db2_installed.stat.exists
+            - not db2_tar_stat.stat.exists
+            - db2_installer_url | length == 0
+
+        - name: Copy the Db2 media from the file server to the target via scp
+          # scp -O exists only in OpenSSH 8.7 and newer; OpenSSH 8.0 on RHEL 8 rejects it as an unknown option.
+          shell: |
+            SCP_O="-O"
+            scp -O 2>&1 | grep -qi "unknown option" && SCP_O=""
+            sshpass -f /root/.db2_scp_pw \
+              scp $SCP_O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 \
+              {{ file_server_user }}@{{ file_server_host }}:{{ db2_tar_src }} \
+              {{ db2_tar }} > /var/tmp/db2_scp.log 2>&1
+          args:
+            executable: /bin/bash
+            creates: "{{ db2_tar }}"
+          async: 3600
+          poll: 10
+          register: db2_scp
+          ignore_errors: true
+          when:
+            - not db2_installed.stat.exists
+            - not db2_tar_stat.stat.exists
+            - db2_installer_url | length == 0
+
+        - name: Remove the temporary password file
+          file:
+            path: /root/.db2_scp_pw
+            state: absent
+
+        - name: Read the scp log when the copy failed
+          shell: "grep -v '^$' /var/tmp/db2_scp.log | tail -n 8 2>&1; ls -lh {{ db2_tar }} 2>&1; df -h {{ db2_tar | dirname }} 2>&1 | tail -n 1"
+          register: db2_scp_log
+          changed_when: false
+          failed_when: false
+          when: db2_scp.failed | default(false)
+
+        - name: Fail with the scp error
+          fail:
+            msg: |-
+              Copying the Db2 media from {{ file_server_user }}@{{ file_server_host }}:{{ db2_tar_src }} failed.
+              {{ db2_scp_log.stdout | default('') }}
+              {{ db2_scp.msg | default('') }}
+          when: db2_scp.failed | default(false)
+
+        - name: Checksum the Db2 media
+          stat:
+            path: "{{ db2_tar }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: db2_tar_final
+          when: not db2_installed.stat.exists
+
+        - name: Fail when the Db2 media checksum does not match
+          fail:
+            msg: >-
+              {{ db2_tar }} is missing or its sha256 ({{ db2_tar_final.stat.checksum | default('n/a') }})
+              is not the expected {{ db2_tar_sha }}. Delete the file and rerun, or set db2_tar_sha256 for a different build.
+          when:
+            - not db2_installed.stat.exists
+            - db2_tar_sha | length > 0
+            - (not db2_tar_final.stat.exists) or (db2_tar_final.stat.checksum | default('') != db2_tar_sha)
+
+        - name: Create the Db2 media work directory
+          file:
+            path: "{{ db2_media_dir }}"
+            state: directory
+            mode: "0755"
+          when: not db2_installed.stat.exists
+
+        - name: Unpack the Db2 media
+          unarchive:
+            src: "{{ db2_tar }}"
+            dest: "{{ db2_media_dir }}"
+            remote_src: true
+            creates: "{{ db2_media_dir }}/universal/db2_install"
+          when: not db2_installed.stat.exists
+
+        # db2_install runs db2prereqcheck itself and stops when a requirement is missing (it is not forced).
+        # -y accepts the license, -n makes it non-interactive, -p SERVER installs the Db2 server.
+        - name: Run the Db2 silent install
+          shell: |
+            ./db2_install -y -n -b {{ db2_dir }} -p SERVER -l /var/tmp/db2_install.log > /var/tmp/db2_install.out 2>&1
+            rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "db2_install failed with rc=$rc"
+              tail -n 40 /var/tmp/db2_install.out
+              echo "--- prerequisite check log"
+              tail -n 40 /tmp/db2prereqcheck.log.* 2>/dev/null
+              exit $rc
+            fi
+          args:
+            executable: /bin/bash
+            chdir: "{{ db2_media_dir }}/universal"
+          async: 3600
+          poll: 15
+          when: not db2_installed.stat.exists
+
+        - name: Confirm the Db2 binaries are installed
+          stat:
+            path: "{{ db2_dir }}/bin/db2"
+          register: db2_installed_after
+          failed_when: not db2_installed_after.stat.exists
+
+        - name: Create the Db2 groups
+          group:
             name: "{{ item }}"
             state: present
           loop:
-            - db2inst1
-            - db2fenc1
+            - db2iadm1
+            - db2fadm1
 
-        - name: Download Db2 installer archive if URL provided
-          get_url:
-            url: "{{ db2_installer_url }}"
-            dest: /tmp/db2_installer.tar.gz
-            mode: "0644"
-          when: db2_installer_url | length > 0
+        - name: Create the Db2 instance owner and fenced users
+          user:
+            name: "{{ item.name }}"
+            group: "{{ item.group }}"
+            shell: /bin/bash
+            create_home: true
+            state: present
+          loop:
+            - { name: "{{ db2_inst }}", group: db2iadm1 }
+            - { name: "{{ db2_fenced }}", group: db2fadm1 }
 
-        - name: Unarchive Db2 installer
-          unarchive:
-            src: "{{ '/tmp/db2_installer.tar.gz' if (db2_installer_url | length > 0) else '/opt/db2_installer.tar.gz' }}"
-            dest: /tmp
-            remote_src: true
+        - name: Write the instance owner password to a temporary 0600 file
+          copy:
+            dest: /root/.db2_chpw
+            content: "{{ db2_inst }}:{{ db_admin_password }}\n"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
 
-        - name: Execute Db2 silent install
-          command: /tmp/server_dec/db2_install -y -b /opt/ibm/db2/V11.5 -p SERVER
+        - name: Set the instance owner OS password (db_admin_password)
+          shell: "chpasswd < /root/.db2_chpw; rc=$?; rm -f /root/.db2_chpw; exit $rc"
           args:
-            creates: /opt/ibm/db2/V11.5/bin/db2
+            executable: /bin/bash
+          no_log: true
 
-        - name: Create Db2 Instance
-          command: /opt/ibm/db2/V11.5/instance/db2icrt -u db2fenc1 db2inst1
+        - name: Create the Db2 instance
+          command: "{{ db2_dir }}/instance/db2icrt -u {{ db2_fenced }} {{ db2_inst }}"
           args:
-            creates: /home/db2inst1/sqllib/db2profile
+            creates: "/home/{{ db2_inst }}/sqllib/db2profile"
 
-        - name: Start Db2 and create database
-          shell: |
-            su - db2inst1 -c "
-            db2start || true
-            db2 update dbm cfg using svcename 50000 || true
-            db2set DB2COMM=tcpip || true
-            db2 create db {{ db_name }} || true
-            "
+        # The instance is stopped here, so the TCP/IP settings are applied before the first start.
+        - name: Configure TCP/IP communication for the instance
+          shell: >-
+            runuser -l {{ db2_inst }} -c
+            '. ~/sqllib/db2profile; db2set DB2COMM=tcpip && db2 update dbm cfg using SVCENAME {{ db2_tcp_port }}'
+          args:
+            executable: /bin/bash
           changed_when: true
+
+        - name: Start the Db2 instance
+          shell: |
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile
+            out=$(db2start 2>&1); rc=$?
+            echo "$out"
+            [ $rc -eq 0 ] && exit 0
+            echo "$out" | grep -q SQL1026N && exit 0
+            exit $rc'
+          args:
+            executable: /bin/bash
+          register: db2_start
+          changed_when: "'SQL1026N' not in db2_start.stdout"
+
+        - name: Create the Db2 database (this can take a few minutes)
+          shell: |
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile
+            if db2 list db directory | grep -qi "Database name *= {{ db2_dbname }}$"; then echo "database {{ db2_dbname }} already exists"; exit 0; fi
+            db2 create database {{ db2_dbname }}'
+          args:
+            executable: /bin/bash
+          async: 1800
+          poll: 10
+          register: db2_create
+          changed_when: "'DB20000I' in db2_create.stdout"
+          failed_when: db2_create.rc not in [0, 2]
+
+        - name: Verify the database accepts connections and answers a query
+          shell: |
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile
+            db2 connect to {{ db2_dbname }} || exit 1
+            db2 "select count(*) as tables from syscat.tables" || exit 1
+            db2 connect reset'
+          args:
+            executable: /bin/bash
+          register: db2_query
+          changed_when: false
+
+        - name: Verify the instance listens on the Db2 TCP port
+          shell: "ss -ltn | awk '{print $4}' | grep -E '[:.]{{ db2_tcp_port }}$'"
+          register: db2_listen
+          retries: 6
+          delay: 5
+          until: db2_listen.rc == 0
+          changed_when: false
+
+        - name: Show the Db2 license (product and expiry)
+          shell: ". /home/{{ db2_inst }}/sqllib/db2profile; {{ db2_dir }}/adm/db2licm -l"
+          args:
+            executable: /bin/bash
+          register: db2_license
+          changed_when: false
+          failed_when: false
+
+        # Start the instance at boot and stop it cleanly. The helper scripts treat "already started" (SQL1026N) and
+        # "already stopped" (SQL1032N) as success, so starting the unit after the playbook started Db2 is a no-op.
+        - name: Create the Db2 instance start helper
+          copy:
+            dest: /usr/local/sbin/db2-instance-start.sh
+            owner: root
+            group: root
+            mode: "0755"
+            content: |
+              #!/bin/bash
+              . /home/{{ db2_inst }}/sqllib/db2profile
+              out=$(db2start 2>&1); rc=$?
+              echo "$out"
+              [ $rc -eq 0 ] && exit 0
+              echo "$out" | grep -q SQL1026N && exit 0
+              exit $rc
+
+        - name: Create the Db2 instance stop helper
+          copy:
+            dest: /usr/local/sbin/db2-instance-stop.sh
+            owner: root
+            group: root
+            mode: "0755"
+            content: |
+              #!/bin/bash
+              . /home/{{ db2_inst }}/sqllib/db2profile
+              out=$(db2stop force 2>&1); rc=$?
+              echo "$out"
+              [ $rc -eq 0 ] && exit 0
+              echo "$out" | grep -q SQL1032N && exit 0
+              exit $rc
+
+        - name: Create the Db2 systemd unit
+          copy:
+            dest: /etc/systemd/system/db2-instance.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=IBM Db2 instance {{ db2_inst }}
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              User={{ db2_inst }}
+              Group=db2iadm1
+              ExecStart=/usr/local/sbin/db2-instance-start.sh
+              ExecStop=/usr/local/sbin/db2-instance-stop.sh
+              TimeoutStartSec=300
+              TimeoutStopSec=300
+
+              [Install]
+              WantedBy=multi-user.target
+
+        - name: Enable and start the Db2 unit
+          systemd:
+            name: db2-instance
+            daemon_reload: true
+            enabled: true
+            state: started
+
+        - name: Verify the unit is active and the database still answers
+          shell: |
+            systemctl is-active --quiet db2-instance || exit 1
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile; db2 connect to {{ db2_dbname }} && db2 connect reset'
+          args:
+            executable: /bin/bash
+          register: db2_unit_check
+          retries: 6
+          delay: 10
+          until: db2_unit_check.rc == 0
+          changed_when: false
+
+        - name: Remove the unpacked Db2 media (the downloaded archive is kept)
+          file:
+            path: "{{ db2_media_dir }}"
+            state: absent
+
+        - name: Display the Db2 connection settings
+          debug:
+            msg:
+              - "Instance: {{ db2_inst }} (OS user, password = db_admin_password)"
+              - "Database: {{ db2_dbname }}"
+              - "TCP port: {{ db2_tcp_port }}"
+              - "Install path: {{ db2_dir }} ({{ db2_rel.full }})"
+              - "License: {{ db2_license.stdout_lines | default([]) | select('search', '(?i)product name|license type|expiry') | list }}"
+              - "systemd unit: db2-instance.service"
       when:
         - platform == 'linux'
         - db_type == 'db2'
         - ansible_os_family == 'RedHat'
+
 
     # Informix 14.10 Developer Edition. The media (ibm.server.<version>.Linux.64.x86_64.tar) is a signed wrapper:
     # outer tar -> inner tar -> ids_install. The target pulls the outer tar from the file server (same sshpass
@@ -2151,9 +2519,9 @@
           Details:
           - Platform: {{ platform }}
           - Type: {{ db_type }}
-          - Release: {{ oracle_label if db_type == 'oracle' else 'n/a' }}
-          - Database Name: {{ db_name }}
-          - Admin User: {{ 'sys / system / pdbadmin (db_admin_user is ignored for Oracle)' if db_type == 'oracle' else db_admin_user }}
+          - Release: {{ oracle_label if db_type == 'oracle' else (('Db2 ' ~ db2_rel.full) if db_type == 'db2' else 'n/a') }}
+          - Database Name: {{ db_name | upper if db_type == 'db2' else db_name }}
+          - Admin User: {{ 'sys / system / pdbadmin (db_admin_user is ignored for Oracle)' if db_type == 'oracle' else ('db2inst1 (OS user, password = db_admin_password; db_admin_user is ignored for Db2)' if db_type == 'db2' else db_admin_user) }}
           - Port: {{ ifx_port.stdout if (db_type == 'informix' and ifx_port is defined and (ifx_port.stdout | default('') | length > 0)) else db_port }}
           - Data Directory: {{ oracle_data_dir if oracle_zip_install | bool else data_dir }}
           - ORACLE_HOME: {{ oracle_home if oracle_zip_install | bool else 'n/a' }}
