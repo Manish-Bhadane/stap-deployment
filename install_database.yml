@@ -147,11 +147,13 @@
         tar: /opt/db2/11.5/v11.5.9_linuxx64_universal_fixpack.tar.gz
         sha256: fbf2db621b3ba6721efa0ea0343a7fcb06e57ad903dca134d6735f15117b2e8b
         dir: /opt/ibm/db2/V11.5
+        icrt_opts: ''
       '12.1':
         full: '12.1.6'
         tar: /opt/db2/12.1/v12.1.6_linuxx64_universal_fixpack.tar.gz
         sha256: 926f7fa549fd32e4cbb4b2003375648dfb0b9ac214c20b12f95249c3f37c01b5
         dir: /opt/ibm/db2/V12.1
+        icrt_opts: '-nosharedgroup'
     db2_rel: "{{ db2_release_map[db2_release] if db2_release in db2_release_map else db2_release_map['11.5'] }}"
     informix_installer_url: "{{ informix_package_url | default('') }}"
 
@@ -1889,8 +1891,10 @@
             executable: /bin/bash
           no_log: true
 
+        # 12.1 db2icrt fails with DBI20196E unless -sharedgroup or -nosharedgroup is given (-nosharedgroup = world
+        # file permissions). It is passed only for 12.1 (icrt_opts in db2_release_map); 11.5 is left unchanged.
         - name: Create the Db2 instance
-          command: "{{ db2_dir }}/instance/db2icrt -u {{ db2_fenced }} {{ db2_inst }}"
+          command: "{{ db2_dir }}/instance/db2icrt {{ db2_rel.icrt_opts }} -u {{ db2_fenced }} {{ db2_inst }}"
           args:
             creates: "/home/{{ db2_inst }}/sqllib/db2profile"
 
