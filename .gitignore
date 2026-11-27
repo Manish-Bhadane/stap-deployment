@@ -1,3 +1,7 @@
 
 # Oracle installer ZIPs are too large for git; copy them to the target instead
 LINUX.X64_*.zip
+
+# Informix installer archives (large, never commit)
+ibm.server.*.tar
+*.tar.cosign.sig

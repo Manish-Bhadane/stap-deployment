@@ -1684,48 +1684,278 @@
         - db_type == 'db2'
         - ansible_os_family == 'RedHat'
 
+    # Informix 14.10 Developer Edition. The media (ibm.server.<version>.Linux.64.x86_64.tar) is a signed wrapper:
+    # outer tar -> inner tar -> ids_install. The target pulls the outer tar from the file server (same sshpass
+    # scp method and source_ssh_password credential as Oracle), unless informix_package_url is set.
     - name: Linux | IBM Informix on RedHat family
+      vars:
+        ifx_dir: /opt/ibm/informix
+        ifx_server: "{{ informix_server_name | default('ol_informix1410') }}"
+        ifx_tar: "{{ informix_tar_file | default('/opt/ibm.server.14.10.13.10.Linux.64.x86_64.tar') }}"
+        ifx_tar_src: "{{ source_installer_path | default(ifx_tar) }}"
+        ifx_tar_sha256: "{{ informix_tar_sha256 | default('e63a0c37ab1ab95b0d71a1cf73b62b5a86967454c97cd612dafdafc558dece9e') }}"
       block:
-        - name: Install Informix OS prerequisites
+        - name: Check whether Informix is already installed
+          stat:
+            path: "{{ ifx_dir }}/bin/oninit"
+          register: ifx_installed
+
+        - name: Install Informix OS prerequisites (the installer JVM needs a non-CFF font)
           dnf:
             name:
               - libaio
               - pam
-              - ncurses
+              - ncurses-libs
+              - ncurses-compat-libs
+              - libgcc
+              - libstdc++
+              - elfutils-libelf
+              - bc
+              - tar
+              - fontconfig
+              - dejavu-sans-fonts
             state: present
+            skip_broken: true
 
-        - name: Ensure Informix user exists
-          user:
+        - name: Create the informix group
+          group:
             name: informix
             state: present
 
-        - name: Download Informix installer archive if URL provided
+        - name: Create the informix user
+          user:
+            name: informix
+            group: informix
+            shell: /bin/bash
+            create_home: true
+            state: present
+
+        - name: Check whether the Informix media is already on the target
+          stat:
+            path: "{{ ifx_tar }}"
+            get_checksum: false
+          register: ifx_tar_stat
+          when: not ifx_installed.stat.exists
+
+        - name: Download the Informix media from informix_package_url
           get_url:
             url: "{{ informix_installer_url }}"
-            dest: /tmp/informix_installer.tar
+            dest: "{{ ifx_tar }}"
             mode: "0644"
-          when: informix_installer_url | length > 0
+          when:
+            - not ifx_installed.stat.exists
+            - not ifx_tar_stat.stat.exists
+            - informix_installer_url | length > 0
 
-        - name: Unpack Informix installer
-          unarchive:
-            src: "{{ '/tmp/informix_installer.tar' if (informix_installer_url | length > 0) else '/opt/informix_installer.tar' }}"
-            dest: /tmp
-            remote_src: true
+        - name: Require the file server credential when the Informix media must be fetched
+          assert:
+            that:
+              - source_ssh_password is defined
+              - source_ssh_password | length > 0
+            fail_msg: "Injected credential variable missing: source_ssh_password (file server password for {{ file_server_user }}@{{ file_server_host }})"
+          when:
+            - not ifx_installed.stat.exists
+            - not ifx_tar_stat.stat.exists
+            - informix_installer_url | length == 0
 
-        - name: Run Informix silent installer
-          command: /tmp/ids_install -i silent -DLICENSE_ACCEPTED=TRUE -DUSER_INSTALL_DIR=/opt/ibm/informix
-          args:
-            creates: /opt/ibm/informix/bin/oninit
+        - name: Install sshpass on the target when it is missing (needed for the scp step)
+          shell: "command -v sshpass >/dev/null 2>&1 || dnf install -y sshpass"
+          register: ifx_sshpass
+          changed_when: "'Installed' in ifx_sshpass.stdout"
+          failed_when: false
+          when:
+            - not ifx_installed.stat.exists
+            - not ifx_tar_stat.stat.exists
+            - informix_installer_url | length == 0
 
-        - name: Initialize Informix Server Engine
+        - name: Write the file server password to a temporary 0600 file (keeps it off command lines and out of -vvv logs)
+          copy:
+            dest: /root/.informix_scp_pw
+            content: "{{ source_ssh_password }}"
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          when:
+            - not ifx_installed.stat.exists
+            - not ifx_tar_stat.stat.exists
+            - informix_installer_url | length == 0
+
+        - name: Copy the Informix media from the file server to the target via scp
+          # scp -O exists only in OpenSSH 8.7 and newer; OpenSSH 8.0 on RHEL 8 rejects it as an unknown option.
           shell: |
-            export INFORMIXDIR=/opt/ibm/informix
-            export PATH=$INFORMIXDIR/bin:$PATH
-            export ONCONFIG=onconfig.std
-            export INFORMIXSERVER=ol_informix1410
-            oninit -ivy || true
-          become_user: informix
-          changed_when: true
+            SCP_O="-O"
+            scp -O 2>&1 | grep -qi "unknown option" && SCP_O=""
+            sshpass -f /root/.informix_scp_pw \
+              scp $SCP_O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 \
+              {{ file_server_user }}@{{ file_server_host }}:{{ ifx_tar_src }} \
+              {{ ifx_tar }} > /var/tmp/informix_scp.log 2>&1
+          args:
+            executable: /bin/bash
+            creates: "{{ ifx_tar }}"
+          async: 1800
+          poll: 10
+          register: ifx_scp
+          ignore_errors: true
+          when:
+            - not ifx_installed.stat.exists
+            - not ifx_tar_stat.stat.exists
+            - informix_installer_url | length == 0
+
+        - name: Remove the temporary password file
+          file:
+            path: /root/.informix_scp_pw
+            state: absent
+
+        - name: Read the scp log when the copy failed
+          shell: "grep -v '^$' /var/tmp/informix_scp.log | tail -n 8 2>&1; ls -lh {{ ifx_tar }} 2>&1"
+          register: ifx_scp_log
+          changed_when: false
+          failed_when: false
+          when: ifx_scp.failed | default(false)
+
+        - name: Fail with the scp error
+          fail:
+            msg: |-
+              Copying the Informix media from {{ file_server_user }}@{{ file_server_host }}:{{ ifx_tar_src }} failed.
+              {{ ifx_scp_log.stdout | default('') }}
+              {{ ifx_scp.msg | default('') }}
+          when: ifx_scp.failed | default(false)
+
+        - name: Checksum the Informix media
+          stat:
+            path: "{{ ifx_tar }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: ifx_tar_final
+          when: not ifx_installed.stat.exists
+
+        - name: Fail when the Informix media checksum does not match
+          fail:
+            msg: >-
+              {{ ifx_tar }} is missing or its sha256 ({{ ifx_tar_final.stat.checksum | default('n/a') }})
+              is not the expected {{ ifx_tar_sha256 }}. Delete the file and rerun, or set informix_tar_sha256 for a different build.
+          when:
+            - not ifx_installed.stat.exists
+            - ifx_tar_sha256 | length > 0
+            - (not ifx_tar_final.stat.exists) or (ifx_tar_final.stat.checksum | default('') != ifx_tar_sha256)
+
+        - name: Create the Informix media work directories
+          file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0755"
+          loop:
+            - /tmp/informix_media
+            - /tmp/informix_media/ids
+          when: not ifx_installed.stat.exists
+
+        - name: Unpack the outer (signed) Informix media
+          unarchive:
+            src: "{{ ifx_tar }}"
+            dest: /tmp/informix_media
+            remote_src: true
+            creates: "/tmp/informix_media/{{ ifx_tar | basename }}"
+          when: not ifx_installed.stat.exists
+
+        - name: Unpack the inner Informix installer tar
+          unarchive:
+            src: "/tmp/informix_media/{{ ifx_tar | basename }}"
+            dest: /tmp/informix_media/ids
+            remote_src: true
+            creates: /tmp/informix_media/ids/ids_install
+          when: not ifx_installed.stat.exists
+
+        - name: Write the Informix silent install response file
+          copy:
+            dest: /tmp/informix_install.properties
+            owner: root
+            group: root
+            mode: "0600"
+            content: |
+              LICENSE_ACCEPTED=TRUE
+              USER_INSTALL_DIR={{ ifx_dir }}
+              IDS_INSTANCE_CREATE=1
+              IDS_INSTANCE_INIT=1
+              IDS_INFORMIXSERVER={{ ifx_server }}
+          when: not ifx_installed.stat.exists
+
+        # INFORMIXDIR in the environment overrides USER_INSTALL_DIR (IBM defect IC98753), so it is removed here.
+        - name: Run the Informix silent installer
+          shell: >-
+            env -u INFORMIXDIR /tmp/informix_media/ids/ids_install -i silent
+            -f /tmp/informix_install.properties > /var/tmp/informix_install.log 2>&1
+          args:
+            executable: /bin/bash
+            chdir: /tmp/informix_media/ids
+          async: 1800
+          poll: 15
+          register: ifx_install
+          failed_when: false
+          when: not ifx_installed.stat.exists
+
+        - name: Check that the installer produced oninit
+          stat:
+            path: "{{ ifx_dir }}/bin/oninit"
+          register: ifx_oninit
+
+        - name: Read the installer log when the install failed
+          shell: "tail -n 40 /var/tmp/informix_install.log 2>&1; ls -t /tmp/*nformix* /var/tmp/*nformix* 2>/dev/null | head -5"
+          register: ifx_install_log
+          changed_when: false
+          failed_when: false
+          when: not ifx_oninit.stat.exists
+
+        - name: Fail with the Informix installer error
+          fail:
+            msg: |-
+              Informix installer did not create {{ ifx_dir }}/bin/oninit (installer rc={{ ifx_install.rc | default('n/a') }}).
+              {{ ifx_install_log.stdout | default('') }}
+          when: not ifx_oninit.stat.exists
+
+        - name: Remove the response file
+          file:
+            path: /tmp/informix_install.properties
+            state: absent
+
+        - name: Wait for the Informix server to be On-Line
+          shell: |
+            ONC=$(ls {{ ifx_dir }}/etc 2>/dev/null | grep '^onconfig\.' | grep -v -E '^onconfig\.(std|all)$' | head -1)
+            runuser -u informix -- env INFORMIXDIR={{ ifx_dir }} INFORMIXSERVER={{ ifx_server }} \
+              INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts ONCONFIG=${ONC:-onconfig.std} \
+              {{ ifx_dir }}/bin/onstat - 2>&1 | tee /var/tmp/informix_onstat.txt | grep -q "On-Line"
+          args:
+            executable: /bin/bash
+          register: ifx_online
+          retries: 12
+          delay: 10
+          until: ifx_online.rc == 0
+          changed_when: false
+          failed_when: false
+
+        - name: Read Informix state when the server is not On-Line
+          shell: "cat /var/tmp/informix_onstat.txt 2>&1; ls {{ ifx_dir }}/etc 2>&1 | head -30; echo '--- sqlhosts'; cat {{ ifx_dir }}/etc/sqlhosts 2>&1; echo '--- install log'; tail -n 30 /var/tmp/informix_install.log 2>&1"
+          register: ifx_state
+          changed_when: false
+          failed_when: false
+          when: ifx_online.rc != 0
+
+        - name: Fail when the Informix server is not On-Line
+          fail:
+            msg: |-
+              Informix {{ ifx_server }} is not On-Line after the install.
+              {{ ifx_state.stdout | default('') }}
+          when: ifx_online.rc != 0
+
+        - name: Show the Informix connection settings
+          shell: "grep -v '^#' {{ ifx_dir }}/etc/sqlhosts"
+          register: ifx_sqlhosts
+          changed_when: false
+          failed_when: false
+
+        - name: Display the Informix sqlhosts entries (server name, protocol, host, port)
+          debug:
+            msg: "{{ ifx_sqlhosts.stdout_lines }}"
       when:
         - platform == 'linux'
         - db_type == 'informix'
