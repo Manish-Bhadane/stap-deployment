@@ -1943,6 +1943,29 @@
             executable: /bin/bash
           register: db2_query
           changed_when: false
+          failed_when: false
+
+        - name: Collect Db2 diagnostics when the connection check failed
+          shell: |
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile
+            echo "--- db2level"; db2level | head -n 8
+            echo "--- db directory"; db2 list db directory
+            echo "--- db2diag.log (last 30 lines)"; tail -n 30 ~/sqllib/db2dump/DIAG0000/db2diag.log 2>/dev/null || tail -n 30 ~/sqllib/db2dump/db2diag.log'
+          args:
+            executable: /bin/bash
+          register: db2_diag
+          changed_when: false
+          failed_when: false
+          when: db2_query.rc != 0
+
+        - name: Fail with the Db2 connection error
+          fail:
+            msg: |-
+              The Db2 database {{ db2_dbname }} did not accept a connection or a query (rc={{ db2_query.rc }}).
+              {{ db2_query.stdout | default('') }}
+              {{ db2_query.stderr | default('') }}
+              {{ db2_diag.stdout | default('') }}
+          when: db2_query.rc != 0
 
         - name: Verify the instance listens on the Db2 TCP port
           shell: "ss -ltn | awk '{print $4}' | grep -E '[:.]{{ db2_tcp_port }}$'"
