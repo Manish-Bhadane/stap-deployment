@@ -1938,7 +1938,7 @@
             runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile
             db2 connect to {{ db2_dbname }} || exit 1
             db2 "select count(*) as tables from syscat.tables" || exit 1
-            db2 connect reset'
+            db2 connect reset >/dev/null 2>&1; exit 0'
           args:
             executable: /bin/bash
           register: db2_query
@@ -2050,7 +2050,7 @@
         - name: Verify the unit is active and the database still answers
           shell: |
             systemctl is-active --quiet db2-instance || exit 1
-            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile; db2 connect to {{ db2_dbname }} && db2 connect reset'
+            runuser -l {{ db2_inst }} -c '. ~/sqllib/db2profile; db2 connect to {{ db2_dbname }} || exit 1; db2 connect reset >/dev/null 2>&1; exit 0'
           args:
             executable: /bin/bash
           register: db2_unit_check
