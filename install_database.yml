@@ -1714,8 +1714,18 @@
               - tar
               - fontconfig
               - dejavu-sans-fonts
+              - java-11-openjdk
             state: present
             skip_broken: true
+
+        # ids_install searches PATH for a Java first and only uses its bundled one when none is found, so an
+        # older default Java (1.8 on some images) fails with UnsupportedClassVersionError (needs Java 11).
+        # Java 17.0.8 and newer has a separate IBM-documented installer problem, so Java 11 is forced.
+        - name: Find a Java 11 runtime to force on the Informix installer
+          shell: "ls -d /usr/lib/jvm/java-11-openjdk*/bin/java 2>/dev/null | head -1"
+          register: ifx_java11
+          changed_when: false
+          failed_when: ifx_java11.stdout | length == 0
 
         - name: Create the informix group
           group:
@@ -1883,7 +1893,7 @@
         # INFORMIXDIR in the environment overrides USER_INSTALL_DIR (IBM defect IC98753), so it is removed here.
         - name: Run the Informix silent installer
           shell: >-
-            env -u INFORMIXDIR /tmp/informix_media/ids/ids_install -i silent
+            env -u INFORMIXDIR /tmp/informix_media/ids/ids_install LAX_VM {{ ifx_java11.stdout }} -i silent
             -f /tmp/informix_install.properties > /var/tmp/informix_install.log 2>&1
           args:
             executable: /bin/bash
