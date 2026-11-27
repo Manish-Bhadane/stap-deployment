@@ -2001,6 +2001,75 @@
               {{ ifx_sqlhosts.stdout | default('(unreadable)') }}
           when: ifx_dbaccess.rc != 0 or (ifx_port.stdout | default('') | length == 0)
 
+        - name: Give the informix login shell the Informix environment (so onstat and dbaccess work after su - informix)
+          blockinfile:
+            path: /home/informix/.bash_profile
+            create: true
+            owner: informix
+            group: informix
+            mode: "0644"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK Informix"
+            block: |
+              export INFORMIXDIR={{ ifx_dir }}
+              export INFORMIXSERVER={{ ifx_server }}
+              export INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }}
+              export ONCONFIG=onconfig.{{ ifx_server }}
+              export PATH=$INFORMIXDIR/bin:$PATH
+
+        # The start command never uses oninit -i (it initializes disk space). IBM documents that an existing root
+        # dbspace is not reinitialized unless FULL_DISK_INIT=1, but -i is still avoided. The unit first checks whether
+        # the server is already On-Line (the installer started it), so starting the unit is a no-op in that case.
+        - name: Create the Informix systemd unit (start at boot, clean shutdown with onmode -ky)
+          copy:
+            dest: /etc/systemd/system/informix.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=IBM Informix Server {{ ifx_server }}
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=oneshot
+              RemainAfterExit=yes
+              User=informix
+              Group=informix
+              Environment=INFORMIXDIR={{ ifx_dir }}
+              Environment=INFORMIXSERVER={{ ifx_server }}
+              Environment=INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }}
+              Environment=ONCONFIG=onconfig.{{ ifx_server }}
+              Environment=PATH={{ ifx_dir }}/bin:/usr/local/bin:/usr/bin:/bin
+              ExecStart=/bin/sh -c 'onstat - 2>&1 | grep -q "On-Line" || exec oninit -vy'
+              ExecStop={{ ifx_dir }}/bin/onmode -ky
+              TimeoutStartSec=300
+              TimeoutStopSec=300
+
+              [Install]
+              WantedBy=multi-user.target
+
+        - name: Enable and start the Informix unit
+          systemd:
+            name: informix
+            daemon_reload: true
+            enabled: true
+            state: started
+
+        - name: Verify the unit is active and the server is still On-Line
+          shell: |
+            systemctl is-active --quiet informix || exit 1
+            runuser -u informix -- env INFORMIXDIR={{ ifx_dir }} INFORMIXSERVER={{ ifx_server }} \
+              INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }} ONCONFIG=onconfig.{{ ifx_server }} \
+              {{ ifx_dir }}/bin/onstat - 2>&1 | grep -q "On-Line"
+          args:
+            executable: /bin/bash
+          register: ifx_unit_check
+          retries: 6
+          delay: 10
+          until: ifx_unit_check.rc == 0
+          changed_when: false
+
         - name: Display the Informix connection settings
           debug:
             msg:
@@ -2008,6 +2077,7 @@
               - "TCP port in use: {{ ifx_port.stdout }}"
               - "sqlhosts file: {{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }}"
               - "sqlhosts entries: {{ ifx_sqlhosts.stdout_lines }}"
+              - "systemd unit: informix.service"
       when:
         - platform == 'linux'
         - db_type == 'informix'
@@ -2084,7 +2154,7 @@
           - Release: {{ oracle_label if db_type == 'oracle' else 'n/a' }}
           - Database Name: {{ db_name }}
           - Admin User: {{ 'sys / system / pdbadmin (db_admin_user is ignored for Oracle)' if db_type == 'oracle' else db_admin_user }}
-          - Port: {{ db_port }}
+          - Port: {{ ifx_port.stdout if (db_type == 'informix' and ifx_port is defined and (ifx_port.stdout | default('') | length > 0)) else db_port }}
           - Data Directory: {{ oracle_data_dir if oracle_zip_install | bool else data_dir }}
           - ORACLE_HOME: {{ oracle_home if oracle_zip_install | bool else 'n/a' }}
 
