@@ -1928,11 +1928,12 @@
             path: /tmp/informix_install.properties
             state: absent
 
+        # The installer names the files after the instance (onconfig.<server>, sqlhosts.<server>); there is no
+        # plain "sqlhosts". Confirmed from the running oninit environment on a RHEL 8.10 test host.
         - name: Wait for the Informix server to be On-Line
           shell: |
-            ONC=$(ls {{ ifx_dir }}/etc 2>/dev/null | grep '^onconfig\.' | grep -v -E '^onconfig\.(std|all)$' | head -1)
             runuser -u informix -- env INFORMIXDIR={{ ifx_dir }} INFORMIXSERVER={{ ifx_server }} \
-              INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts ONCONFIG=${ONC:-onconfig.std} \
+              INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }} ONCONFIG=onconfig.{{ ifx_server }} \
               {{ ifx_dir }}/bin/onstat - 2>&1 | tee /var/tmp/informix_onstat.txt | grep -q "On-Line"
           args:
             executable: /bin/bash
@@ -1944,7 +1945,7 @@
           failed_when: false
 
         - name: Read Informix state when the server is not On-Line
-          shell: "cat /var/tmp/informix_onstat.txt 2>&1; ls {{ ifx_dir }}/etc 2>&1 | head -30; echo '--- sqlhosts'; cat {{ ifx_dir }}/etc/sqlhosts 2>&1; echo '--- install log'; tail -n 30 /var/tmp/informix_install.log 2>&1"
+          shell: "cat /var/tmp/informix_onstat.txt 2>&1; ls {{ ifx_dir }}/etc 2>&1 | grep -E 'onconfig|sqlhosts'; echo '--- sqlhosts'; cat {{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }} 2>&1; echo '--- install log'; tail -n 30 /var/tmp/informix_install.log 2>&1"
           register: ifx_state
           changed_when: false
           failed_when: false
@@ -1957,15 +1958,56 @@
               {{ ifx_state.stdout | default('') }}
           when: ifx_online.rc != 0
 
-        - name: Show the Informix connection settings
-          shell: "grep -v '^#' {{ ifx_dir }}/etc/sqlhosts"
+        - name: Read the Informix connection entries (server name, protocol, host, port)
+          shell: "grep -v -E '^#|^[[:space:]]*$' {{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }}"
           register: ifx_sqlhosts
           changed_when: false
           failed_when: false
 
-        - name: Display the Informix sqlhosts entries (server name, protocol, host, port)
+        - name: Run a real query through dbaccess against sysmaster
+          shell: |
+            runuser -u informix -- env INFORMIXDIR={{ ifx_dir }} INFORMIXSERVER={{ ifx_server }} \
+              INFORMIXSQLHOSTS={{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }} ONCONFIG=onconfig.{{ ifx_server }} \
+              PATH={{ ifx_dir }}/bin:/usr/bin:/bin \
+              bash -c 'echo "select first 3 name from sysdatabases;" | dbaccess sysmaster -' 2>&1
+          args:
+            executable: /bin/bash
+          register: ifx_dbaccess
+          changed_when: false
+          failed_when: false
+
+        - name: Find the TCP port the Informix server listens on
+          shell: |
+            for p in $(grep -E 'soctcp' {{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }} | grep -v '^#' | awk '{print $4}'); do
+              case "$p" in
+                ''|*[!0-9]*) n=$(getent services "$p" | awk '{split($2,a,"/"); print a[1]}') ;;
+                *) n="$p" ;;
+              esac
+              [ -n "$n" ] && ss -ltn | grep -q ":$n " && echo "$n"
+            done | head -1
+          args:
+            executable: /bin/bash
+          register: ifx_port
+          changed_when: false
+          failed_when: false
+
+        - name: Fail when the Informix server cannot be queried or does not listen on TCP
+          fail:
+            msg: |-
+              Informix is On-Line but the connection check failed.
+              dbaccess (rc={{ ifx_dbaccess.rc | default('n/a') }}): {{ ifx_dbaccess.stdout | default('') }}
+              Listening TCP port found: {{ ifx_port.stdout | default('none') }}
+              sqlhosts.{{ ifx_server }}:
+              {{ ifx_sqlhosts.stdout | default('(unreadable)') }}
+          when: ifx_dbaccess.rc != 0 or (ifx_port.stdout | default('') | length == 0)
+
+        - name: Display the Informix connection settings
           debug:
-            msg: "{{ ifx_sqlhosts.stdout_lines }}"
+            msg:
+              - "Server name: {{ ifx_server }}"
+              - "TCP port in use: {{ ifx_port.stdout }}"
+              - "sqlhosts file: {{ ifx_dir }}/etc/sqlhosts.{{ ifx_server }}"
+              - "sqlhosts entries: {{ ifx_sqlhosts.stdout_lines }}"
       when:
         - platform == 'linux'
         - db_type == 'informix'
